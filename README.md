@@ -10,7 +10,15 @@ sozinho a cada minuto enquanto a apuração está em andamento.
 
 ## Como usar
 
+**Online:** https://eupedrodiogo.github.io/eleicao/ (GitHub Pages, publicado pela
+automação `.github/workflows/pages.yml` a cada alteração do site).
+
+**No seu computador** (precisa do [Node.js](https://nodejs.org) 18 ou mais novo):
+
 ```bash
+git clone https://github.com/eupedrodiogo/eleicao.git
+cd eleicao
+git checkout claude/zen-gauss-x082qz
 node server.mjs          # http://localhost:8080
 ```
 
