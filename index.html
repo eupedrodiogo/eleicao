@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Painel Eleições 2026</title>
+  <meta name="description" content="Acompanhamento da apuração das Eleições 2026 com dados públicos do TSE em tempo real: 2º turno, comparação com o 1º turno e com eleições anteriores.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232a78d6'/%3E%3Cpath d='M8 17l5 5 11-12' stroke='white' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topo">
+    <div class="topo-linha">
+      <div class="marca-titulo">
+        <h1>Eleições 2026 <span>· Presidente</span></h1>
+        <p class="sub">Apuração em tempo real com os arquivos públicos do TSE</p>
+      </div>
+      <div class="estado" aria-live="polite">
+        <span id="status" class="pill pill-espera">Conectando…</span>
+        <span id="atualizado" class="mudo"></span>
+        <button id="atualizar" type="button" class="botao" title="Buscar os dados agora">Atualizar</button>
+        <button id="tema" type="button" class="botao botao-icone" aria-label="Alternar tema claro/escuro" title="Alternar tema claro/escuro">Tema</button>
+      </div>
+    </div>
+    <nav class="controles" aria-label="Filtros">
+      <div class="segmentado" role="tablist" aria-label="Turno">
+        <button type="button" role="tab" data-turno="2" aria-selected="true">2º turno</button>
+        <button type="button" role="tab" data-turno="1" aria-selected="false">1º turno</button>
+      </div>
+      <label class="seletor">Recorte
+        <select id="recorte" aria-label="Recorte geográfico"></select>
+      </label>
+      <span id="conexao" class="mudo pequeno"></span>
+    </nav>
+  </header>
+
+  <main>
+    <div id="aviso" class="aviso" hidden></div>
+
+    <section id="placar" class="cartao placar" aria-labelledby="placar-titulo">
+      <div class="cartao-cabeca">
+        <h2 id="placar-titulo">Resultado</h2>
+        <span id="placar-hora" class="mudo pequeno"></span>
+      </div>
+      <div id="placar-corpo"><p class="mudo">Carregando dados do TSE…</p></div>
+    </section>
+
+    <section class="kpis" id="indicadores" aria-label="Indicadores da votação"></section>
+
+    <div class="grade-2">
+      <section class="cartao" aria-labelledby="comp-titulo">
+        <div class="cartao-cabeca">
+          <h2 id="comp-titulo">1º turno × 2º turno</h2>
+          <span id="comp-nota" class="mudo pequeno"></span>
+        </div>
+        <div id="comp-grafico"></div>
+        <div class="legenda" id="comp-legenda"></div>
+        <div id="comp-tabela" class="tabela-rolagem"></div>
+      </section>
+
+      <section class="cartao" aria-labelledby="proj-titulo">
+        <div class="cartao-cabeca">
+          <h2 id="proj-titulo">Projeção e votos em jogo</h2>
+          <span class="mudo pequeno">estimativa, não é resultado oficial</span>
+        </div>
+        <div id="projecao"></div>
+      </section>
+    </div>
+
+    <section class="cartao" aria-labelledby="mapa-titulo">
+      <div class="cartao-cabeca">
+        <h2 id="mapa-titulo">Mapa por estado</h2>
+        <label class="seletor">Mostrar
+          <select id="modo-mapa">
+            <option value="margem2">Margem no 2º turno</option>
+            <option value="margem1">Margem no 1º turno</option>
+            <option value="virada">Mudança de margem (1º → 2º turno)</option>
+            <option value="vs2022">Mudança de margem vs 2º turno 2022</option>
+            <option value="abstencao">Abstenção no 2º turno</option>
+            <option value="apuracao">Seções apuradas</option>
+          </select>
+        </label>
+      </div>
+      <div class="mapa-area">
+        <div id="mapa" class="mapa" role="group" aria-label="Mapa em grade dos estados"></div>
+        <div>
+          <div id="mapa-legenda" class="legenda legenda-mapa"></div>
+          <p id="mapa-explica" class="mudo pequeno"></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="cartao" aria-labelledby="ufs-titulo">
+      <div class="cartao-cabeca">
+        <h2 id="ufs-titulo">Resultados por estado</h2>
+        <span class="mudo pequeno">clique no cabeçalho para ordenar; na linha para abrir o estado</span>
+      </div>
+      <div id="tabela-ufs" class="tabela-rolagem"></div>
+    </section>
+
+    <div class="grade-2">
+      <section class="cartao" aria-labelledby="reg-titulo">
+        <div class="cartao-cabeca">
+          <h2 id="reg-titulo">Por região</h2>
+          <span class="mudo pequeno">soma dos votos das UFs (sem o Exterior)</span>
+        </div>
+        <div id="regioes"></div>
+        <div class="legenda" id="regioes-legenda"></div>
+      </section>
+
+      <section class="cartao" aria-labelledby="evo-titulo">
+        <div class="cartao-cabeca">
+          <h2 id="evo-titulo">Evolução da apuração</h2>
+          <span id="evo-nota" class="mudo pequeno"></span>
+        </div>
+        <div id="evolucao"></div>
+      </section>
+    </div>
+
+    <section class="cartao" aria-labelledby="hist-titulo">
+      <div class="cartao-cabeca">
+        <h2 id="hist-titulo">Eleições presidenciais 2010–2026</h2>
+        <span class="mudo pequeno">Brasil · 2026 com dados do TSE ao vivo</span>
+      </div>
+      <h3>2º turno: votos válidos de cada finalista</h3>
+      <div id="hist-segundo"></div>
+      <div class="grade-2 grade-interna">
+        <div>
+          <h3>Abstenção (% do eleitorado)</h3>
+          <div id="hist-abstencao"></div>
+        </div>
+        <div>
+          <h3>Brancos + nulos (% dos votos)</h3>
+          <div id="hist-invalidos"></div>
+        </div>
+      </div>
+      <div class="legenda" id="hist-legenda"></div>
+      <details class="detalhes">
+        <summary>Tabela com todos os números</summary>
+        <div id="hist-tabela" class="tabela-rolagem"></div>
+      </details>
+    </section>
+
+    <section class="cartao" aria-labelledby="gov-titulo">
+      <div class="cartao-cabeca">
+        <h2 id="gov-titulo">Governadores · 2º turno</h2>
+        <span id="gov-nota" class="mudo pequeno"></span>
+      </div>
+      <div id="governadores" class="governadores"><p class="mudo">Carregando…</p></div>
+    </section>
+  </main>
+
+  <footer class="rodape">
+    <p>Fonte: <a href="https://resultados.tse.jus.br/oficial/app/index.html" rel="noopener" target="_blank">Tribunal Superior Eleitoral (TSE)</a>,
+      arquivos públicos de divulgação de resultados. O painel lê os mesmos arquivos JSON usados pelo site e pelo app Resultados do TSE e
+      atualiza sozinho a cada minuto enquanto a apuração está em andamento. Percentuais de candidatos são sobre os votos válidos;
+      brancos e nulos, sobre o comparecimento; abstenção e comparecimento, sobre o eleitorado das seções já apuradas.
+      Projeções e somas por região são cálculos deste painel, não resultados oficiais.</p>
+    <p class="mudo pequeno">Eleições anteriores: totalização final do TSE (2010–2022).</p>
+  </footer>
+
+  <script src="js/config.js"></script>
+  <script src="js/tse.js"></script>
+  <script src="js/historico.js"></script>
+  <script src="js/graficos.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

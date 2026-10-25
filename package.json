@@ -1,0 +1,13 @@
+{
+  "name": "painel-eleicoes-2026",
+  "version": "1.0.0",
+  "description": "Painel de acompanhamento da apuração das Eleições 2026 com dados públicos do TSE",
+  "private": true,
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

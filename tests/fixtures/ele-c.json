@@ -1,0 +1,53 @@
+{
+  "_nota": "Arquivo sintético para os testes, no formato do TSE. Os números não são oficiais.",
+  "c": "ele-c",
+  "dg": "25/10/2026",
+  "hg": "17:00:00",
+  "pl": [
+    {
+      "cd": "3220",
+      "dt": "04/10/2026",
+      "e": [
+        {
+          "cd": "6257",
+          "t": "1",
+          "tp": "2",
+          "cdt2": "6258",
+          "nm": "Eleição Ordinária Federal - 2026 1º Turno"
+        },
+        {
+          "cd": "6259",
+          "t": "1",
+          "tp": "2",
+          "cdt2": "6261",
+          "nm": "Eleição Ordinária Estadual - 2026 1º Turno"
+        }
+      ]
+    },
+    {
+      "cd": "3221",
+      "dt": "25/10/2026",
+      "e": [
+        {
+          "cd": "6258",
+          "t": "2",
+          "tp": "2",
+          "nm": "Eleição Ordinária Federal - 2026 2º Turno"
+        }
+      ]
+    },
+    {
+      "cd": "406",
+      "dt": "02/10/2022",
+      "e": [
+        {
+          "cd": "544",
+          "t": "1",
+          "tp": "2",
+          "cdt2": "545",
+          "nm": "Eleição Geral Federal 2022"
+        }
+      ]
+    }
+  ]
+}

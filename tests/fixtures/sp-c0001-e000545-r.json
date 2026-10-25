@@ -1,0 +1,49 @@
+{
+  "_nota": "Arquivo sintético para os testes, no formato do TSE. Os números não são oficiais.",
+  "ele": "545",
+  "tpabr": "UF",
+  "cdabr": "SP",
+  "t": "2",
+  "f": "O",
+  "dg": "30/10/2022",
+  "hg": "21:44:58",
+  "s": "101137",
+  "st": "101137",
+  "pst": "100,00",
+  "e": "34667793",
+  "ea": "34667793",
+  "c": "27779963",
+  "pc": "80,13",
+  "a": "6887830",
+  "pa": "19,87",
+  "vb": "452035",
+  "pvb": "1,63",
+  "tvn": "1032838",
+  "ptvn": "3,72",
+  "vv": "26295090",
+  "pvv": "94,65",
+  "cand": [
+    {
+      "seq": "1",
+      "sqcand": "280001618036",
+      "n": "22",
+      "nm": "JAIR BOLSONARO",
+      "cc": "PELO BEM DO BRASIL",
+      "e": "n",
+      "st": "Não eleito",
+      "vap": "14216587",
+      "pvap": "54,07"
+    },
+    {
+      "seq": "2",
+      "sqcand": "280001607829",
+      "n": "13",
+      "nm": "LULA",
+      "cc": "BRASIL DA ESPERANÇA",
+      "e": "s",
+      "st": "Eleito",
+      "vap": "12078503",
+      "pvap": "45,93"
+    }
+  ]
+}
