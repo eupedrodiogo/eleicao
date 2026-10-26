@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Eleições 2026: apuração ao vivo para presidente</title>
+  <meta name="description" content="Acompanhe a apuração das Eleições 2026 em tempo real, com dados públicos do TSE: quem está na frente, resultado por estado e comparação entre 1º turno, 2º turno e eleições anteriores.">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="pt_BR">
+  <meta property="og:title" content="Eleições 2026: apuração ao vivo para presidente">
+  <meta property="og:description" content="Quem está na frente, resultado por estado e o que mudou do 1º para o 2º turno, com dados públicos do TSE.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="assets/fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="css/style.css">
+  <script>
+    /* Aplica o tema salvo antes de desenhar, para a página não "piscar". */
+    try {
+      var tema = localStorage.getItem("painel:tema");
+      if (tema === "dark" || tema === "light") document.documentElement.setAttribute("data-theme", tema);
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <a class="pular" href="#conteudo">Pular para o conteúdo</a>
+
+  <header class="topo">
+    <div class="wrap topo-in">
+      <a class="marca" href="#resumo">
+        <svg class="marca-icone" viewBox="0 0 34 34" aria-hidden="true">
+          <rect width="34" height="34" rx="10" fill="var(--ink)"/>
+          <path d="M9 18.5l5.5 5.5L25.5 11" fill="none" stroke="var(--surface)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="marca-texto"><b>Eleições 2026</b><small>Painel de apuração</small></span>
+      </a>
+
+      <nav class="menu" id="menu" aria-label="Seções da página">
+        <a href="#resumo">Resumo</a>
+        <a href="#estados">Estados</a>
+        <a href="#comparar">1º × 2º turno</a>
+        <a href="#projecao">O que falta</a>
+        <a href="#historico">Histórico</a>
+        <a href="#governadores">Governadores</a>
+        <a href="#entenda">Entenda</a>
+      </nav>
+
+      <div class="topo-acoes">
+        <span id="status" class="status espera" role="status"><span class="status-txt">Conectando…</span></span>
+        <button id="atualizar" type="button" class="icone-btn" aria-label="Atualizar os resultados agora" title="Atualizar agora">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+        </button>
+        <button id="tema" type="button" class="icone-btn" aria-label="Alternar entre tema claro e escuro" title="Tema claro/escuro">
+          <svg class="icone-lua" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+          <svg class="icone-sol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="conteudo" class="wrap">
+    <h1 class="so-leitor">Eleições 2026: painel de apuração para presidente</h1>
+    <noscript><div class="aviso erro">Este painel precisa de JavaScript para buscar os resultados no site do TSE. Ative o JavaScript no navegador ou consulte resultados.tse.jus.br.</div></noscript>
+    <div id="aviso" class="aviso" role="status" hidden></div>
+
+    <!-- 1. Resumo -->
+    <section id="resumo" class="secao" aria-label="Resumo do resultado">
+      <article id="hero" class="cartao hero">
+        <div class="esq" style="height:24px;width:150px"></div>
+        <div class="esq" style="height:52px;width:72%;margin-top:22px"></div>
+        <div class="esq" style="height:20px;width:55%;margin-top:16px"></div>
+        <div class="duelo">
+          <div class="esq" style="height:190px;border-radius:16px"></div>
+          <div class="esq" style="height:190px;border-radius:16px"></div>
+        </div>
+      </article>
+      <div id="kpis" class="kpis" aria-label="Indicadores da votação">
+        <div class="cartao kpi"><div class="esq" style="height:90px"></div></div>
+        <div class="cartao kpi"><div class="esq" style="height:90px"></div></div>
+        <div class="cartao kpi"><div class="esq" style="height:90px"></div></div>
+        <div class="cartao kpi"><div class="esq" style="height:90px"></div></div>
+      </div>
+      <p id="kpis-nota" class="nota"></p>
+    </section>
+
+    <!-- 2. Estados -->
+    <section id="estados" class="secao" aria-labelledby="estados-titulo">
+      <header class="secao-cab">
+        <p class="eyebrow">Por estado</p>
+        <h2 id="estados-titulo">Como cada estado está votando</h2>
+        <p class="secao-desc">Clique em um estado para ver os números dele. A cor mostra quem está na frente e por quanto.</p>
+      </header>
+
+      <div class="grade-estados">
+        <div class="cartao">
+          <div class="mapa-ctrl">
+            <label class="campo">Colorir o mapa por
+              <select id="modo-mapa">
+                <option value="lider2">Quem está na frente (2º turno)</option>
+                <option value="lider1">Quem ficou na frente no 1º turno</option>
+                <option value="osc1">Quem ganhou terreno desde o 1º turno</option>
+                <option value="osc22">Quem ganhou terreno desde 2022</option>
+                <option value="abst">Abstenção (2º turno)</option>
+                <option value="urnas">Urnas apuradas (2º turno)</option>
+              </select>
+            </label>
+            <div class="segmentado" role="group" aria-label="Tipo de mapa">
+              <button type="button" data-visao="geo" aria-pressed="true">Mapa</button>
+              <button type="button" data-visao="grade" aria-pressed="false">Quadrados</button>
+            </div>
+          </div>
+          <div id="mapa-area"><div class="esq" style="height:420px;border-radius:16px"></div></div>
+          <ul id="mapa-legenda" class="legenda" aria-label="Legenda do mapa"></ul>
+          <p id="mapa-explica" class="nota"></p>
+        </div>
+
+        <aside id="painel-uf" class="cartao painel-uf" aria-label="Resultado do estado escolhido">
+          <div class="cartao-cab">
+            <div>
+              <h3 id="painel-titulo" class="painel-titulo">Brasil</h3>
+              <p id="painel-sub" class="painel-sub"></p>
+            </div>
+            <label class="campo">Ver outro estado
+              <select id="uf-select" aria-label="Escolher o estado para ver os detalhes"></select>
+            </label>
+          </div>
+          <div id="painel-uf-corpo"><div class="esq" style="height:260px"></div></div>
+        </aside>
+      </div>
+
+      <div class="cartao" style="margin-top:16px">
+        <div class="cartao-cab">
+          <div>
+            <h3>Por região do país</h3>
+            <p class="cartao-sub">Soma dos votos dos estados de cada região (sem o Exterior). O traço no meio marca 50%.</p>
+          </div>
+        </div>
+        <div id="regioes"><div class="esq" style="height:180px"></div></div>
+      </div>
+
+      <div class="cartao" style="margin-top:16px">
+        <div class="tabela-cab">
+          <div>
+            <h3>Todos os estados lado a lado</h3>
+            <p class="cartao-sub">Toque no título de uma coluna para ordenar. Toque numa linha para ver o estado.</p>
+          </div>
+          <label class="campo busca">Buscar estado
+            <input id="filtro-uf" type="search" placeholder="Nome ou sigla" autocomplete="off" aria-controls="tabela-ufs">
+          </label>
+        </div>
+        <div class="tabela-wrap"><table id="tabela-ufs" class="tabela"></table></div>
+      </div>
+    </section>
+
+    <!-- 3. Comparar -->
+    <section id="comparar" class="secao" aria-labelledby="comparar-titulo">
+      <header class="secao-cab">
+        <p class="eyebrow">Do 1º para o 2º turno</p>
+        <h2 id="comparar-titulo">O que mudou entre os dois turnos</h2>
+        <p class="secao-desc">No 2º turno sobram só dois candidatos. Veja como os votos se redistribuíram e como isso se compara com 2022.</p>
+      </header>
+      <div id="comparar-corpo"><div class="cartao"><div class="esq" style="height:220px"></div></div></div>
+    </section>
+
+    <!-- 4. O que falta -->
+    <section id="projecao" class="secao" aria-labelledby="projecao-titulo">
+      <header class="secao-cab">
+        <p class="eyebrow">O que falta</p>
+        <h2 id="projecao-titulo">Para onde a apuração está caminhando</h2>
+        <p class="secao-desc">Quanto ainda falta contar, o que isso pode significar para o resultado final e como o placar evoluiu ao longo da noite.</p>
+      </header>
+      <div class="grade-2">
+        <div class="cartao">
+          <div class="cartao-cab"><h3>O que ainda pode mudar</h3></div>
+          <div id="projecao-corpo"><div class="esq" style="height:220px"></div></div>
+        </div>
+        <div class="cartao">
+          <div class="cartao-cab"><h3>Como o placar evoluiu</h3><span id="evo-nota" class="mudo pequeno"></span></div>
+          <div id="evolucao"><div class="esq" style="height:220px"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. Histórico -->
+    <section id="historico" class="secao" aria-labelledby="historico-titulo">
+      <header class="secao-cab">
+        <p class="eyebrow">Histórico</p>
+        <h2 id="historico-titulo">Eleições presidenciais desde 2010</h2>
+        <p class="secao-desc">Como foram os 2º turnos anteriores e como a participação dos eleitores mudou com o tempo.</p>
+      </header>
+
+      <div class="cartao">
+        <div class="cartao-cab">
+          <div>
+            <h3>Resultado do 2º turno em cada eleição</h3>
+            <p class="cartao-sub">Cada barra mostra como os votos válidos se dividiram entre os dois finalistas. O traço no meio marca 50%.</p>
+          </div>
+        </div>
+        <div id="hist-segundo"></div>
+        <ul id="hist-legenda-cores" class="legenda"></ul>
+        <p id="hist-leitura-1" class="leitura" hidden></p>
+      </div>
+
+      <div class="cartao" style="margin-top:16px">
+        <div class="hist-ctrl">
+          <div>
+            <h3>Participação dos eleitores</h3>
+            <p id="hist-sub" class="cartao-sub"></p>
+          </div>
+          <div class="segmentado" role="group" aria-label="Escolher o indicador">
+            <button type="button" data-hist="abstencao" aria-pressed="true">Abstenção</button>
+            <button type="button" data-hist="invalidos" aria-pressed="false">Brancos e nulos</button>
+          </div>
+        </div>
+        <div id="hist-linhas"></div>
+        <ul id="hist-legenda" class="legenda"></ul>
+        <p id="hist-leitura-2" class="leitura" hidden></p>
+        <details class="detalhes">
+          <summary>Ver todos os números em tabela</summary>
+          <div id="hist-tabela" class="tabela-wrap"></div>
+        </details>
+      </div>
+    </section>
+
+    <!-- 6. Governadores -->
+    <section id="governadores" class="secao" aria-labelledby="gov-titulo">
+      <header class="secao-cab">
+        <p class="eyebrow">Governadores</p>
+        <h2 id="gov-titulo">2º turno para governador</h2>
+        <p id="gov-desc" class="secao-desc">Alguns estados também escolhem o governador no 2º turno. Veja onde a disputa está acontecendo.</p>
+      </header>
+      <div id="governadores-corpo"><div class="esq" style="height:140px"></div></div>
+    </section>
+
+    <!-- 7. Entenda -->
+    <section id="entenda" class="secao" aria-labelledby="entenda-titulo">
+      <header class="secao-cab">
+        <p class="eyebrow">Entenda</p>
+        <h2 id="entenda-titulo">Perguntas frequentes</h2>
+        <p class="secao-desc">Respostas curtas e simples para quem quer entender melhor os números.</p>
+      </header>
+      <div id="faq" class="faq"></div>
+    </section>
+  </main>
+
+  <footer class="rodape">
+    <div class="wrap rodape-in">
+      <p><b>Painel independente.</b> Este site não é oficial e não tem vínculo com o Tribunal Superior Eleitoral (TSE) nem com qualquer campanha. O resultado oficial é o divulgado pelo TSE em <a href="https://resultados.tse.jus.br/oficial/app/index.html" target="_blank" rel="noopener">resultados.tse.jus.br</a>.</p>
+      <p>Os números vêm dos arquivos públicos de divulgação de resultados do TSE e são consultados a cada minuto durante a apuração. Percentuais de candidatos são sobre os votos válidos; comparecimento e abstenção, sobre o eleitorado das urnas já apuradas. Projeções e somas por região são cálculos deste painel. Eleições de 2010 a 2022: totalização final do TSE.</p>
+      <p><a href="https://github.com/eupedrodiogo/eleicao" target="_blank" rel="noopener">Código aberto no GitHub</a></p>
+    </div>
+  </footer>
+
+  <script src="js/config.js"></script>
+  <script src="js/tse.js"></script>
+  <script src="js/historico.js"></script>
+  <script src="js/texto.js"></script>
+  <script src="js/mapa-dados.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/dados.js"></script>
+  <script src="js/graficos.js"></script>
+  <script src="js/mapa.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
