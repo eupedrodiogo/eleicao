@@ -32,6 +32,9 @@ window.PAINEL_CONFIG = {
     anterior2: { codigo: "545", ciclo: "ele2022", formato: "r", turno: 2, rotulo: "2º turno 2022" },
   },
 
+  // Datas por extenso, usadas nos textos.
+  datas: { turno1: "4 de outubro", turno2: "25 de outubro" },
+
   // Cor de cada candidato pelo número (cor da legenda, nunca do texto).
   // Quem não estiver aqui recebe as cores reservas, na ordem.
   cores: { 13: "vermelho", 22: "azul" },

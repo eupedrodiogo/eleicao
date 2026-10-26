@@ -173,3 +173,29 @@ test("histórico embutido confere com os totais oficiais", () => {
   assert.equal(HISTORICO.comoResultado(2010, 1).validos, 101590153);
   assert.equal(HISTORICO.comoResultado(1999, 1), null);
 });
+
+test("partilha e oscilacao comparam só os votos dos dois candidatos", () => {
+  const monta = (a, b, outros) => TSE.normalizar({
+    s: { ts: "1", st: "1", pst: "100,00" }, v: { vv: String(a + b + outros) },
+    carg: [{ agr: [{ par: [{ cand: [{ n: "13", vap: String(a) }, { n: "22", vap: String(b) }, { n: "30", vap: String(outros) }] }] }] }],
+  });
+  const turno1 = monta(450, 470, 80); // 13: 45%, 22: 47%, outro: 8%
+  const turno2 = monta(500, 500, 0);
+
+  const p1 = TSE.partilha(turno1, "13", "22");
+  perto(p1.a, 48.91, 0.01);
+  perto(p1.b, 51.09, 0.01);
+  assert.equal(p1.votos, 920);
+
+  const osc = TSE.oscilacao(turno1, turno2, "13", "22");
+  perto(osc.mudancaA, 1.09, 0.01); // o 13 ganhou ~1,1 ponto entre os dois
+  perto(osc.depois.a, 50, 0.001);
+
+  // A margem "crua" do 1º turno (45 x 47) é menor que a dos votos entre os dois (48,9 x 51,1)
+  perto(TSE.margem(turno1, "22", "13"), 2, 0.01);
+  perto(p1.b - p1.a, 2.17, 0.01);
+
+  assert.equal(TSE.partilha(turno1, "13", "99"), null);
+  assert.equal(TSE.partilha(monta(0, 0, 5), "13", "22"), null);
+  assert.equal(TSE.oscilacao(null, turno2, "13", "22"), null);
+});

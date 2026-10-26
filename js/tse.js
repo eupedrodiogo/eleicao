@@ -281,6 +281,33 @@
   }
 
   /**
+   * Parcela de cada um dos dois candidatos considerando só os votos dados a
+   * eles (ignora brancos, nulos e os demais candidatos). É o que permite
+   * comparar o 1º turno, que tem vários candidatos, com o 2º, que tem dois.
+   * Devolve {a, b, votos} em % ou null se nenhum dos dois tem voto.
+   */
+  function partilha(resultado, numeroA, numeroB) {
+    const a = candidato(resultado, numeroA);
+    const b = candidato(resultado, numeroB);
+    if (!a || !b) return null;
+    const total = a.votos + b.votos;
+    if (!total) return null;
+    return { a: (a.votos / total) * 100, b: (b.votos / total) * 100, votos: total };
+  }
+
+  /**
+   * Quanto a parcela de `a` (entre os votos dos dois) mudou de um resultado
+   * para outro, em pontos percentuais. Positivo = `a` ganhou terreno e `b`
+   * perdeu o mesmo tanto. Devolve {antes, depois, mudancaA} ou null.
+   */
+  function oscilacao(antes, depois, numeroA, numeroB) {
+    const p0 = partilha(antes, numeroA, numeroB);
+    const p1 = partilha(depois, numeroA, numeroB);
+    if (!p0 || !p1) return null;
+    return { antes: p0, depois: p1, mudancaA: p1.a - p0.a };
+  }
+
+  /**
    * Projeção simples do resultado final: em cada UF (e no Exterior), os votos
    * já apurados são extrapolados para 100% das seções mantendo a proporção
    * atual da UF. UFs sem nenhuma seção apurada usam a proporção nacional e
@@ -370,7 +397,7 @@
     });
     function achar(tipo, turno) {
       return lista.find(function (e) {
-        const nome = e.nome.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+        const nome = e.nome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
         const turnoOk = e.turno === turno || nome.indexOf(turno + "o turno") >= 0 || nome.indexOf(turno + "º turno") >= 0;
         return nome.indexOf(tipo) >= 0 && turnoOk;
       });
@@ -409,6 +436,8 @@
     somar: somar,
     finalistas: finalistas,
     margem: margem,
+    partilha: partilha,
+    oscilacao: oscilacao,
     projetar: projetar,
     lerConfiguracao: lerConfiguracao,
     descobrirCodigos: descobrirCodigos,

@@ -1,1126 +1,1189 @@
 /**
- * Painel de acompanhamento das Eleições 2026.
+ * Painel Eleições 2026: desenho da página.
  *
- * Fluxo: lê a configuração do TSE (códigos das eleições) → carrega os
- * resultados finais do 1º turno de 2026 e de 2022 (uma vez, com cache) →
- * consulta o 2º turno e os governadores a cada minuto → redesenha.
+ * Os dados vêm de Dados (js/dados.js); os textos, de Texto (js/texto.js).
+ * Aqui só decidimos o que mostrar e como: resumo, indicadores, mapa por estado,
+ * comparação entre turnos, o que falta, histórico, governadores e perguntas.
  */
 (function () {
   const CFG = window.PAINEL_CONFIG;
+  const { TSE, Texto, UI, Graficos, Mapa, Dados, HISTORICO } = window;
+  const { esc, fmtN, inteiro, pct, sinal, pontos, votos, milhoes, nomeExibicao, nomeCurto, apelidos } = Texto;
+  const estado = Dados.estado;
   const params = new URLSearchParams(location.search);
-  const ABRANGENCIAS = ["br"].concat(TSE.UFS, ["zz"]);
-
-  // Mapa em grade: [linha, coluna] de cada UF (aproximação da geografia).
-  const GRADE = {
-    rr: [0, 2], ap: [0, 3],
-    am: [1, 1], pa: [1, 2], ma: [1, 3], ce: [1, 4], rn: [1, 5],
-    ac: [2, 0], ro: [2, 1], to: [2, 2], pi: [2, 3], pe: [2, 4], pb: [2, 5],
-    mt: [3, 1], go: [3, 2], ba: [3, 3], se: [3, 4], al: [3, 5],
-    ms: [4, 1], df: [4, 2], mg: [4, 3], es: [4, 4],
-    pr: [5, 1], sp: [5, 2], rj: [5, 3],
-    sc: [6, 1], rs: [7, 1], zz: [7, 5],
-  };
-
-  const estado = {
-    eleicoes: JSON.parse(JSON.stringify(CFG.eleicoes)),
-    turno: params.get("turno") === "1" ? 1 : 2,
-    recorte: ABRANGENCIAS.indexOf(String(params.get("uf") || "").toLowerCase()) >= 0 ? params.get("uf").toLowerCase() : "br",
-    dados: { federal1: {}, federal2: {}, anterior1: {}, anterior2: {}, estadual2: {} },
-    governadoresPresentes: null,
-    viaProxy: params.get("proxy") === "1",
-    modoMapa: "margem2",
-    ordem: { coluna: "uf", desc: false },
-    carregando: false,
-    ultimaLeitura: null,
-    proximaLeitura: null,
-    falhas: 0,
-    falhaTotal: false,
-    usandoCache: false,
-    timer: null,
-  };
-
-  // ---- Formatação ----------------------------------------------------------
-  const formatadores = {};
-  function fmtN(v, casas) {
-    if (v == null || !Number.isFinite(v)) return "—";
-    const k = casas == null ? 2 : casas;
-    if (!formatadores[k]) {
-      formatadores[k] = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: k, maximumFractionDigits: k });
-    }
-    return formatadores[k].format(v);
-  }
-  const inteiro = (v) => (v == null ? "—" : fmtN(Math.round(v), 0));
-  const pctTxt = (v, casas) => (v == null ? "—" : fmtN(v, casas == null ? 2 : casas) + "%");
-  function sinal(v, casas) {
-    if (v == null || !Number.isFinite(v)) return "—";
-    const s = v > 0.0049 ? "+" : v < -0.0049 ? "−" : "";
-    return s + fmtN(Math.abs(v), casas == null ? 1 : casas);
-  }
-  const pp = (v) => (v == null ? "—" : sinal(v, 1) + " p.p.");
-  function milhoes(v) {
-    if (v == null) return "—";
-    if (Math.abs(v) >= 1e6) return fmtN(v / 1e6, 1) + " mi";
-    if (Math.abs(v) >= 1e3) return fmtN(v / 1e3, 0) + " mil";
-    return inteiro(v);
-  }
-  function esc(t) {
-    return String(t == null ? "" : t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-  }
-  function nomeCurto(nome) {
-    const n = String(nome || "").trim();
-    if (n.length <= 18) return titulo(n);
-    const partes = n.split(/\s+/);
-    return titulo(partes[0] + " " + partes[partes.length - 1]);
-  }
-  function titulo(t) {
-    return String(t).toLowerCase().replace(/(^|\s|-)([a-zà-ú])/g, (m, a, b) => a + b.toUpperCase()).replace(/\b(Da|De|Do|Dos|Das|E)\b/g, (m) => m.toLowerCase());
-  }
   const $ = (id) => document.getElementById(id);
+  const reduzMovimento = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  // ---- Leitura dos arquivos -----------------------------------------------
-  function urlProxy(url) {
-    return CFG.proxy.replace(/\/$/, "") + url.slice(CFG.base.length);
-  }
+  const UFS_VALIDAS = Dados.ABRANGENCIAS;
+  const ui = {
+    turno: params.get("turno") === "1" ? 1 : 2,
+    uf: UFS_VALIDAS.indexOf(String(params.get("uf") || "").toLowerCase()) >= 0 ? params.get("uf").toLowerCase() : "br",
+    visaoMapa: lerPreferencia("painel:visao-mapa", ["geo", "grade"], "geo"),
+    modoMapa: "lider2",
+    histIndicador: "abstencao",
+    ordem: { coluna: "nome", desc: false },
+    filtro: "",
+    ultimoAnuncio: "",
+    irParaUf: params.has("uf"),
+  };
 
-  /**
-   * Busca um JSON do TSE. Tenta direto (o TSE libera CORS) e, se a rede ou o
-   * CORS falhar, tenta o proxy local. Devolve {json} ou {ausente: true}.
-   */
-  async function lerJSON(url) {
-    const tentativas = estado.viaProxy ? [urlProxy(url)] : [url, urlProxy(url)];
-    let erro = null;
-    for (const alvo of tentativas) {
-      try {
-        const resp = await fetch(alvo, { cache: "no-store" });
-        if (resp.ok) {
-          const json = await resp.json();
-          if (alvo !== url) estado.viaProxy = true;
-          return { json: json };
-        }
-        const doTse = alvo === url || resp.headers.get("x-painel-proxy") === "1";
-        if (doTse && (resp.status === 404 || resp.status === 403)) return { ausente: true };
-        erro = new Error("HTTP " + resp.status);
-      } catch (e) {
-        erro = e;
-      }
-    }
-    throw erro || new Error("falha de rede");
-  }
-
-  async function emLotes(itens, paralelos, fn) {
-    const saida = new Array(itens.length);
-    let i = 0;
-    async function trabalhador() {
-      while (i < itens.length) {
-        const k = i++;
-        try {
-          saida[k] = { ok: true, valor: await fn(itens[k]) };
-        } catch (e) {
-          saida[k] = { ok: false, erro: e };
-        }
-      }
-    }
-    await Promise.all(Array.from({ length: paralelos }, trabalhador));
-    return saida;
-  }
-
-  function chaveCache(chave, cargo) {
-    const e = estado.eleicoes[chave];
-    return "painel:v1:" + e.ciclo + ":" + e.codigo + ":c" + (cargo || 1);
-  }
-  function lerCache(chave, cargo) {
+  function lerPreferencia(chave, validos, padrao) {
     try {
-      const bruto = localStorage.getItem(chaveCache(chave, cargo));
-      return bruto ? JSON.parse(bruto) : null;
+      const v = localStorage.getItem(chave);
+      return validos.indexOf(v) >= 0 ? v : padrao;
     } catch (e) {
-      return null;
+      return padrao;
     }
   }
-  function gravarCache(chave, cargo) {
+  function gravarPreferencia(chave, valor) {
     try {
-      localStorage.setItem(chaveCache(chave, cargo), JSON.stringify({ salvo: Date.now(), dados: estado.dados[chave] }));
+      localStorage.setItem(chave, valor);
     } catch (e) {
-      /* sem armazenamento: o painel segue só com a memória */
+      /* preferência só nesta visita */
     }
   }
 
-  async function carregarEleicao(chave, cargo, abrangencias) {
-    const eleicao = estado.eleicoes[chave];
-    const lista = abrangencias || ABRANGENCIAS;
-    const res = await emLotes(lista, 8, async (uf) => {
-      const r = await lerJSON(TSE.urlResultado(CFG, eleicao, uf, cargo || 1));
-      if (r.ausente) return null;
-      const normal = TSE.normalizar(r.json);
-      if (normal) normal.uf = uf;
-      return normal;
-    });
-    const resumo = { lidos: 0, ausentes: [], falhas: 0 };
-    res.forEach((r, i) => {
-      const uf = lista[i];
-      if (!r.ok) resumo.falhas++;
-      else if (r.valor) {
-        estado.dados[chave][uf] = r.valor;
-        resumo.lidos++;
-      } else resumo.ausentes.push(uf);
-    });
-    return resumo;
-  }
-
-  /** Eleições já encerradas: lê do cache se estiver completo, senão do TSE. */
-  async function carregarFinal(chave) {
-    const cache = lerCache(chave);
-    if (cache && cache.dados && cache.dados.br && cache.dados.br.finalizada && Object.keys(cache.dados).length >= 28) {
-      estado.dados[chave] = cache.dados;
-      return;
-    }
-    const r = await carregarEleicao(chave);
-    const br = estado.dados[chave].br;
-    if (r.falhas === 0 && br && br.finalizada) gravarCache(chave);
-  }
-
-  async function descobrirCodigos() {
-    try {
-      const r = await lerJSON(TSE.urlConfig(CFG));
-      if (!r.json) return;
-      const cod = TSE.descobrirCodigos(r.json, CFG.ano);
-      for (const k of ["federal1", "federal2", "estadual2"]) {
-        if (cod[k]) estado.eleicoes[k].codigo = cod[k];
-      }
-    } catch (e) {
-      /* fica com os códigos de config.js */
-    }
-  }
-
-  async function atualizarAoVivo() {
-    if (estado.carregando) return;
-    estado.carregando = true;
-    definirStatus();
-    try {
-      const r = await carregarEleicao("federal2");
-      estado.falhas = r.falhas;
-      estado.falhaTotal = r.lidos === 0 && r.falhas > 0;
-      if (r.lidos > 0) {
-        estado.ultimaLeitura = new Date();
-        estado.usandoCache = false;
-        gravarCache("federal2");
-        registrarEvolucao();
-      }
-      // Governadores: na primeira vez, procura em todas as UFs; depois, só
-      // nas que têm arquivo de 2º turno.
-      const ufsGov = estado.governadoresPresentes || TSE.UFS;
-      const g = await carregarEleicao("estadual2", 3, ufsGov);
-      if (!estado.governadoresPresentes && g.falhas === 0) {
-        estado.governadoresPresentes = TSE.UFS.filter((uf) => estado.dados.estadual2[uf]);
-      }
-    } finally {
-      estado.carregando = false;
-      renderizar();
-      agendar();
-    }
-  }
-
-  function apuracaoEncerrada() {
-    const d = estado.dados.federal2;
-    if (!d.br || !d.br.finalizada) return false;
-    return TSE.UFS.every((uf) => d[uf] && d[uf].finalizada);
-  }
-
-  function agendar() {
-    clearTimeout(estado.timer);
-    const espera = apuracaoEncerrada() ? 10 * 60000 : CFG.intervalo;
-    estado.proximaLeitura = Date.now() + espera;
-    estado.timer = setTimeout(() => {
-      if (document.hidden) agendar();
-      else atualizarAoVivo();
-    }, espera);
-  }
-
-  // ---- Seleção de dados -----------------------------------------------------
-  function resultado(chave, uf) {
-    const d = estado.dados[chave][uf || estado.recorte];
-    if (d) return d;
-    if ((uf || estado.recorte) !== "br") return null;
-    if (chave === "anterior2") return HISTORICO.comoResultado(2022, 2);
-    if (chave === "anterior1") return HISTORICO.comoResultado(2022, 1);
-    if (chave === "federal1") return primeiroTurnoReserva();
-    return null;
-  }
-
-  function primeiroTurnoReserva() {
-    const p = HISTORICO.PRIMEIRO_TURNO_2026;
-    return {
-      reserva: true, uf: "br", turno: "1", finalizada: true, pctSecoes: 100,
-      candidatos: p.candidatos.map((c) => Object.assign({ sq: "", eleito: false, segundoTurno: true, situacao: "2º turno" }, c)),
-      validos: null, brancos: null, nulos: null, comparecimento: null, abstencao: null, eleitorado: null,
-      pctComparecimento: null, pctAbstencao: null, pctBrancos: null, pctNulos: null, pctValidos: null,
-      dg: "05/10/2026", hg: "12:51:47",
-    };
-  }
-
-  /** Os dois finalistas, em ordem estável (votos no 1º turno no Brasil). */
-  function finalistas() {
-    const br2 = estado.dados.federal2.br;
-    const br1 = resultado("federal1", "br");
-    let par = br2 ? TSE.finalistas(br2) : [];
-    if (par.length < 2 && br1) par = TSE.finalistas(br1);
-    const numeros = par.map((c) => c.numero);
-    if (br1) {
-      numeros.sort((a, b) => {
-        const ca = TSE.candidato(br1, a);
-        const cb = TSE.candidato(br1, b);
-        return (cb ? cb.votos : 0) - (ca ? ca.votos : 0);
-      });
-    }
-    return numeros.map((n) => {
-      const c2 = br2 && TSE.candidato(br2, n);
-      const c1 = br1 && TSE.candidato(br1, n);
-      const base = c2 || c1;
-      return { numero: n, nome: base.nome, partido: base.partido || (c1 && c1.partido) || "", sq: (c2 && c2.sq) || (c1 && c1.sq) || "" };
-    });
-  }
-
-  /** Cores para um conjunto de números: as fixas da configuração e, para os demais, as reservas livres. */
-  function coresPara(numeros) {
+  // ---- Cores dos candidatos --------------------------------------------------
+  /** Papel de cor de cada número: {13: "vermelho", 22: "azul"}. Desconhecidos recebem as cores reservas. */
+  function papeis(numeros) {
     const usadas = new Set();
     const saida = {};
-    for (const n of numeros) {
+    numeros.forEach(function (n) {
       if (CFG.cores[n]) {
         saida[n] = CFG.cores[n];
         usadas.add(CFG.cores[n]);
       }
-    }
-    const livres = CFG.coresReserva.concat(["vermelho", "azul", "laranja", "violeta"]).filter((c) => !usadas.has(c));
-    for (const n of numeros) {
-      if (!saida[n]) {
-        saida[n] = livres.shift() || "violeta";
-        usadas.add(saida[n]);
-      }
-    }
-    for (const n of numeros) saida[n] = "var(--" + saida[n] + ")";
+    });
+    const livres = CFG.coresReserva.concat(["azul", "laranja", "violeta", "vermelho"]);
+    numeros.forEach(function (n) {
+      if (saida[n]) return;
+      let cor;
+      do cor = livres.shift(); while (cor && usadas.has(cor));
+      saida[n] = cor || "violeta";
+      usadas.add(saida[n]);
+    });
     return saida;
   }
+  const fundo = (papel) => "var(--" + papel + ")";
+  const sobre = (papel) => "var(--on-" + papel + ")";
 
-  // ---- Status e topo ---------------------------------------------------------
-  function definirStatus() {
-    const pill = $("status");
-    const br = estado.dados.federal2.br;
-    let classe = "pill-espera";
-    let texto = "Conectando…";
-    if (estado.carregando && !br) texto = "Lendo TSE…";
-    else if (!br) {
-      classe = "pill-erro";
-      texto = "Sem dados do 2º turno";
-    } else if (br.finalizada) {
-      classe = "pill-ok";
-      texto = "Apuração encerrada";
-    } else if (!br.pctSecoes) {
-      texto = "Aguardando apuração";
-    } else {
-      classe = "pill-vivo";
-      texto = "Ao vivo · " + pctTxt(br.pctSecoes) + " apurado";
-    }
-    pill.className = "pill " + classe;
-    pill.textContent = texto;
-    atualizarRelogio();
+  function achar(r, numero) {
+    return r ? TSE.candidato(r, numero) : null;
   }
 
-  function atualizarRelogio() {
-    const br = estado.dados.federal2.br;
-    const partes = [];
-    if (br && br.dg) partes.push("TSE " + br.dg.slice(0, 5) + " " + br.hg);
-    if (estado.carregando) partes.push("atualizando…");
-    else if (estado.proximaLeitura) {
-      const s = Math.max(0, Math.round((estado.proximaLeitura - Date.now()) / 1000));
-      partes.push("próxima em " + (s >= 60 ? Math.round(s / 60) + " min" : s + " s"));
+  // ---- Utilidades de tela ------------------------------------------------------------
+  function fotoHtml(c, chaveEleicao) {
+    const inicial = esc(String(nomeExibicao(c.nome)).charAt(0));
+    const vazio = '<div class="foto foto-vazia" aria-hidden="true">' + inicial + "</div>";
+    const url = c.sq ? TSE.urlFoto(CFG, estado.eleicoes[chaveEleicao], "br", c.sq) : "";
+    if (!url) return vazio;
+    return '<img class="foto" src="' + esc(url) + '" alt="" loading="lazy" referrerpolicy="no-referrer" data-vazio="' + esc(vazio) + '">';
+  }
+
+  /** Barra de duas partes com traço em 50%. `classe` troca o tamanho (barra-fina) e tira o rótulo. */
+  function barraDupla(a, b, classe) {
+    return '<div class="' + (classe || "barra-duelo") + '" aria-hidden="true">' +
+      '<div class="seg a" style="width:' + a.pct + "%;background:" + a.cor + '"></div>' +
+      '<div class="seg b" style="width:' + b.pct + "%;background:" + b.cor + '"></div>' +
+      '<div class="marco">' + (classe ? "" : "<span>50%</span>") + "</div></div>";
+  }
+
+  function garantirVisivel(el) {
+    const r = el.getBoundingClientRect();
+    const topo = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--topo-altura")) || 120;
+    const visivel = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, topo);
+    if (visivel < Math.min(r.height, window.innerHeight * 0.5) * 0.7) {
+      el.scrollIntoView({ behavior: reduzMovimento ? "auto" : "smooth", block: "start" });
     }
-    $("atualizado").textContent = partes.join(" · ");
-    $("conexao").textContent = estado.viaProxy ? "Lendo via proxy local" : "Lendo direto do TSE";
+  }
+
+  /** Avisa leitores de tela só quando o texto da manchete muda (não a cada atualização). */
+  function anunciar(texto) {
+    if (texto === ui.ultimoAnuncio) return;
+    ui.ultimoAnuncio = texto;
+    $("anuncio").textContent = texto;
+  }
+
+  /** <option>s com os estados em ordem alfabética; o primeiro tem valor vazio. */
+  function opcoesUf(primeiro) {
+    const ufs = TSE.UFS.slice().sort(function (x, y) { return TSE.NOMES[x].localeCompare(TSE.NOMES[y], "pt-BR"); });
+    return '<option value="">' + esc(primeiro) + "</option>" +
+      ufs.map(function (uf) { return '<option value="' + uf + '">' + esc(TSE.NOMES[uf]) + "</option>"; }).join("") + '<option value="zz">Exterior</option>';
+  }
+
+  /** Troca o espaço dentro do nome dos candidatos por espaço fixo, para a manchete não quebrar no meio do nome. */
+  function juntarNomes(texto, nomes) {
+    let t = texto;
+    nomes.forEach(function (n) {
+      const exibicao = nomeExibicao(n);
+      if (exibicao.indexOf(" ") > 0) t = t.split(exibicao).join(exibicao.replace(/ /g, "\u00a0"));
+    });
+    return t;
+  }
+
+  function horaTse(r) {
+    return r && r.dg ? TSE.dataHora(r.dg, r.hg) : null;
+  }
+
+  // ---- Topo: situação e botão de atualizar ---------------------------------------------------
+  function renderStatus() {
+    const r = estado.dados.federal2.br;
+    const sit = Dados.situacao();
+    let classe = "espera";
+    let curto = "Conectando…";
+    let longo = "";
+    if (!r) {
+      if (sit === "erro") {
+        classe = "erro";
+        curto = "Sem conexão com o TSE";
+      }
+    } else if (r.finalizada) {
+      classe = "ok";
+      curto = "Apuração encerrada";
+    } else if (!r.pctSecoes) {
+      curto = "Aguardando apuração";
+    } else {
+      classe = "vivo";
+      curto = "Ao vivo";
+      longo = " · " + pct(r.pctSecoes, 1) + " apurado";
+    }
+    const status = $("status");
+    status.className = "status " + classe;
+    status.innerHTML = "<span>" + esc(curto) + '<span class="status-txt-longo">' + esc(longo) + "</span></span>";
+    $("atualizar").classList.toggle("girando", !!estado.carregando);
   }
 
   function renderAviso() {
     const aviso = $("aviso");
-    const msgs = [];
+    let html = "";
+    let erro = false;
     if (estado.falhaTotal) {
-      msgs.push("Não foi possível ler os arquivos do TSE agora (rede ou bloqueio de CORS)." +
+      erro = true;
+      html = "Não foi possível ler os arquivos do TSE agora (rede ou bloqueio do navegador)." +
         (estado.usandoCache ? " Mostrando a última leitura salva neste navegador." : "") +
-        (estado.viaProxy ? "" : " Se persistir, rode `node server.mjs` e abra http://localhost:8080 para ler pelo proxy local."));
+        " A página tenta de novo sozinha a cada minuto." +
+        (estado.viaProxy ? "" : " Se persistir, rode <code>node server.mjs</code> e abra http://localhost:8080 para ler pelo servidor local.");
     } else if (estado.falhas > 0) {
-      msgs.push(estado.falhas + " arquivo(s) do 2º turno falharam nesta leitura; os demais estão atualizados.");
+      html = estado.falhas + " arquivo(s) do 2º turno falharam nesta leitura; o restante está atualizado.";
     }
-    aviso.hidden = msgs.length === 0;
-    aviso.textContent = msgs.join(" ");
+    aviso.hidden = !html;
+    aviso.className = "aviso" + (erro ? " erro" : "");
+    aviso.innerHTML = html ? UI.icone("alerta") + "<span>" + html + "</span>" : "";
   }
 
-  // ---- Placar --------------------------------------------------------------
-  function fotoHtml(c, cor) {
-    const ini = esc(String(c.nome || "?").trim().charAt(0));
-    const url = c.sq ? TSE.urlFoto(CFG, estado.eleicoes.federal2, "br", c.sq) : "";
-    const vazio = '<div class="foto foto-vazia" style="--cor:' + cor + '" aria-hidden="true">' + ini + "</div>";
-    if (!url) return vazio;
-    return '<img class="foto" style="--cor:' + cor + '" src="' + esc(url) + '" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.outerHTML=this.dataset.vazio" data-vazio="' + esc(vazio) + '">';
+  // ---- Resumo ------------------------------------------------------------------------------------
+  function resultadoDoTurno() {
+    return ui.turno === 2 ? estado.dados.federal2.br : Dados.resultado("federal1", "br");
   }
 
-  function renderPlacar() {
-    const corpo = $("placar-corpo");
-    const nomeRecorte = TSE.NOMES[estado.recorte];
-    $("placar-titulo").textContent = (estado.turno === 2 ? "2º turno" : "1º turno") + " · " + nomeRecorte;
-    if (estado.turno === 2) renderPlacarSegundo(corpo);
-    else renderPlacarPrimeiro(corpo);
+  function seloEstado() {
+    if (ui.turno === 1) return { classe: "ok", texto: "Apuração encerrada" };
+    const r = estado.dados.federal2.br;
+    if (!r) return { classe: "espera", texto: Dados.situacao() === "erro" ? "Sem conexão" : "Carregando" };
+    if (r.finalizada) return { classe: "ok", texto: "Apuração encerrada" };
+    if (!r.pctSecoes) return { classe: "espera", texto: "Aguardando apuração" };
+    return { classe: "vivo", texto: "Ao vivo" };
   }
 
-  function horaTse(r) {
-    if (!r || !r.dg) return "";
-    return "Arquivo do TSE de " + r.dg + " às " + r.hg + " (Brasília)";
+  function cartaoCandidato(f, c, papel, ehLider, comecou, chave) {
+    const eleito = !!(c && c.eleito);
+    const selo = eleito ? '<span class="selo">' + UI.icone("check") + "Eleito</span>" : ehLider ? '<span class="selo">À frente</span>' : "";
+    return '<div class="cand' + (ehLider || eleito ? " lider" : "") + '" style="--cor:' + fundo(papel) + ";--sobre:" + sobre(papel) + '">' +
+      '<div class="cand-topo">' + fotoHtml(f, chave) + '<div class="cand-id"><p class="cand-nome">' + esc(nomeExibicao(f.nome)) +
+      '</p><p class="cand-partido">' + esc(f.partido) + " · " + esc(f.numero) + "</p></div></div>" +
+      "<div>" + (comecou
+        ? '<p class="cand-pct">' + fmtN(c.pct, 2) + '<span class="un">%</span></p><p class="cand-votos">' + votos(c.votos) + "</p>"
+        : '<p class="cand-pct mudo">—</p><p class="cand-votos">aguardando as primeiras urnas</p>') + "</div>" + selo + "</div>";
   }
 
-  function progressoHtml(r) {
-    const p = r.pctSecoes || 0;
-    return '<div class="progresso"><div class="progresso-trilho" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + p.toFixed(2) + '" aria-label="Seções apuradas">' +
-      '<div class="progresso-barra" style="width:' + Math.min(100, p) + '%"></div></div>' +
-      '<div class="progresso-texto"><span><b>' + pctTxt(r.pctSecoes) + "</b> das seções apuradas</span><span>" +
-      (r.secoesTotal ? inteiro(r.secoesTotalizadas) + " de " + inteiro(r.secoesTotal) + " seções" : "") + "</span></div></div>";
-  }
-
-  function renderPlacarSegundo(corpo) {
-    const r = resultado("federal2");
-    const par = finalistas();
-    $("placar-hora").textContent = horaTse(r);
-    if (!r || par.length < 2) {
-      let msg = "O arquivo do 2º turno ainda não está disponível para este recorte.";
-      if (estado.falhaTotal) msg = "Não foi possível ler o arquivo do 2º turno no TSE. Uma nova tentativa é feita a cada minuto.";
-      else if (estado.carregando || !estado.ultimaLeitura) msg = "Carregando o arquivo do 2º turno…";
-      corpo.innerHTML = '<p class="mudo">' + msg + "</p>";
-      return;
-    }
-    const cores = coresPara(par.map((c) => c.numero));
-    const comecou = r.pctSecoes > 0;
-    const cands = par.map((f) => Object.assign({}, f, TSE.candidato(r, f.numero) || { votos: 0, pct: null }));
-    const lider = comecou ? (cands[0].votos >= cands[1].votos ? 0 : 1) : -1;
-    const blocos = cands.map((c, i) => {
-      let selo = "";
-      if (c.eleito) selo = '<span class="selo selo-eleito">Eleito</span>';
-      else if (i === lider && cands[0].votos !== cands[1].votos) selo = '<span class="selo">À frente</span>';
-      return '<div class="candidato' + (i === 1 ? " direita" : "") + '">' + fotoHtml(c, cores[c.numero]) +
-        "<div><div class=\"cand-nome\">" + esc(titulo(c.nome)) + '</div><div class="cand-partido">' + esc(c.partido) + " · " + esc(c.numero) + "</div>" +
-        '<div class="cand-pct">' + (comecou ? pctTxt(c.pct) : "—") + '</div><div class="cand-votos">' + (comecou ? inteiro(c.votos) + " votos" : "aguardando") + "</div>" + selo + "</div></div>";
-    });
-    const a = cands[0];
-    const b = cands[1];
-    const dif = comecou ? Math.abs(a.votos - b.votos) : null;
-    const difPct = comecou ? Math.abs((a.pct || 0) - (b.pct || 0)) : null;
-    corpo.innerHTML =
-      '<div class="duelo">' + blocos.join("") + "</div>" +
-      '<div class="divisao" aria-hidden="true">' +
-      (comecou ? '<div style="width:' + a.pct + "%;background:" + cores[a.numero] + '"></div><div style="width:' + b.pct + "%;background:" + cores[b.numero] + '"></div>' : "") +
-      '<div class="marco50"></div></div>' +
-      '<div class="placar-rodape"><span>Diferença: <b>' + (comecou ? inteiro(dif) + " votos" : "—") + "</b>" + (comecou ? " (" + fmtN(difPct, 2) + " p.p.)" : "") + "</span>" +
-      "<span>Votos válidos: <b>" + inteiro(r.validos) + "</b></span>" +
-      "<span>Marca central = 50% dos válidos</span></div>" +
-      progressoHtml(r);
-  }
-
-  function renderPlacarPrimeiro(corpo) {
-    const r = resultado("federal1");
-    $("placar-hora").textContent = r && r.reserva ? "Retrato final salvo no painel (TSE indisponível)" : horaTse(r);
-    if (!r) {
-      corpo.innerHTML = '<p class="mudo">Carregando o arquivo do 1º turno…</p>';
-      return;
-    }
-    const par = finalistas().map((c) => c.numero);
-    const cores = coresPara(par);
-    const max = Math.max.apply(null, r.candidatos.map((c) => c.pct || 0).concat([1]));
-    const linhas = r.candidatos.map((c) => {
-      const cor = cores[c.numero] || "var(--cinza-serie)";
-      const st = c.segundoTurno || par.indexOf(c.numero) >= 0 ? " · <b>2º turno</b>" : c.eleito ? " · <b>Eleito</b>" : "";
-      return '<div class="linha"><div class="nome" title="' + esc(c.nome) + '"><b>' + esc(titulo(c.nome)) + '</b> <span class="mudo pequeno">' + esc(c.partido) + st + "</span></div>" +
-        '<div class="trilho"><div style="width:' + ((c.pct || 0) / max) * 100 + "%;background:" + cor + '"></div></div>' +
-        '<div class="valor"><b>' + pctTxt(c.pct) + '</b><br><span class="mudo pequeno">' + inteiro(c.votos) + "</span></div></div>";
-    });
-    corpo.innerHTML = '<div class="lista-cand">' + linhas.join("") + "</div>" +
-      (r.reserva ? '<p class="nota">Só os dois mais votados estão no retrato salvo. Os demais aparecem quando o arquivo oficial puder ser lido.</p>' : progressoHtml(r));
-  }
-
-  // ---- Indicadores -----------------------------------------------------------
-  function renderKpis() {
-    const r = resultado(estado.turno === 2 ? "federal2" : "federal1");
-    const comparar = estado.turno === 2
-      ? [{ r: resultado("federal1"), nome: "1º turno" }, { r: resultado("anterior2"), nome: "2º turno 2022" }]
-      : [{ r: resultado("anterior1"), nome: "1º turno 2022" }];
-    function deltas(campo) {
-      return comparar.filter((c) => c.r && c.r[campo] != null && r && r[campo] != null)
-        .map((c) => "<span>" + pp(r[campo] - c.r[campo]) + " vs " + c.nome + "</span>").join("<br>");
-    }
+  function blocoDuelo(r, par, P) {
     const comecou = r && r.pctSecoes > 0;
-    const tiles = [
-      { rotulo: "Seções apuradas", valor: r ? pctTxt(r.pctSecoes) : "—", detalhe: r && r.secoesTotal ? inteiro(r.secoesTotalizadas) + " de " + inteiro(r.secoesTotal) : "", delta: "" },
-      { rotulo: "Comparecimento", valor: comecou ? pctTxt(r.pctComparecimento) : "—", detalhe: comecou ? inteiro(r.comparecimento) + " eleitores" : "", delta: comecou ? deltas("pctComparecimento") : "" },
-      { rotulo: "Abstenção", valor: comecou ? pctTxt(r.pctAbstencao) : "—", detalhe: comecou ? inteiro(r.abstencao) + " eleitores" : "", delta: comecou ? deltas("pctAbstencao") : "" },
-      { rotulo: "Votos válidos", valor: comecou ? pctTxt(r.pctValidos) : "—", detalhe: comecou ? inteiro(r.validos) + " votos" : "", delta: comecou ? deltas("pctValidos") : "" },
-      { rotulo: "Brancos", valor: comecou ? pctTxt(r.pctBrancos) : "—", detalhe: comecou ? inteiro(r.brancos) + " votos" : "", delta: comecou ? deltas("pctBrancos") : "" },
-      { rotulo: "Nulos", valor: comecou ? pctTxt(r.pctNulos) : "—", detalhe: comecou ? inteiro(r.nulos) + " votos" : "", delta: comecou ? deltas("pctNulos") : "" },
-      { rotulo: "Eleitorado", valor: r && r.eleitorado ? milhoes(r.eleitorado) : "—", detalhe: r && r.eleitorado ? inteiro(r.eleitorado) + " eleitores aptos" : "", delta: crescimentoEleitorado(r) },
-    ];
-    $("indicadores").innerHTML = tiles.map((t) =>
-      '<div class="cartao kpi"><div class="kpi-rotulo">' + t.rotulo + '</div><div class="kpi-valor">' + t.valor + '</div><div class="kpi-detalhe">' + t.detalhe + "</div>" +
-      (t.delta ? '<div class="kpi-delta">' + t.delta + "</div>" : "") + "</div>").join("");
-  }
-
-  function crescimentoEleitorado(r) {
-    const antes = resultado(estado.turno === 2 ? "anterior2" : "anterior1");
-    if (!r || !r.eleitorado || !antes || !antes.eleitorado) return "";
-    return "<span>" + sinal(((r.eleitorado - antes.eleitorado) / antes.eleitorado) * 100, 1) + "% vs 2022</span>";
-  }
-
-  // ---- 1º × 2º turno ---------------------------------------------------------
-  function renderComparacao() {
-    const r2 = resultado("federal2");
-    const r1 = resultado("federal1");
-    const r22 = resultado("anterior2");
-    const par = finalistas();
-    const cores = coresPara(par.map((c) => c.numero));
-    if (par.length < 2) {
-      $("comp-grafico").innerHTML = '<p class="mudo">Aguardando os dados.</p>';
-      return;
+    const a = achar(r, par[0].numero);
+    const b = achar(r, par[1].numero);
+    const completo = comecou && a && b;
+    const ladoA = completo && a.votos > b.votos;
+    const ladoB = completo && b.votos > a.votos;
+    let html = '<div class="duelo">' +
+      cartaoCandidato(par[0], a, P[par[0].numero], ladoA, completo, "federal2") +
+      cartaoCandidato(par[1], b, P[par[1].numero], ladoB, completo, "federal2") + "</div>";
+    if (completo) {
+      html += '<div class="barra-duelo" role="img" aria-label="' + esc(nomeCurto(par[0].nome)) + " " + pct(a.pct, 2) + ", " + esc(nomeCurto(par[1].nome)) + " " + pct(b.pct, 2) + '">' +
+        '<div class="seg a" style="width:' + a.pct + "%;background:" + fundo(P[par[0].numero]) + '"></div>' +
+        '<div class="seg b" style="width:' + b.pct + "%;background:" + fundo(P[par[1].numero]) + '"></div>' +
+        '<div class="marco"><span>50%</span></div></div>';
+      const dif = Math.abs(a.votos - b.votos);
+      const difPts = Math.abs(a.pct - b.pct);
+      html += '<dl class="resumo-numeros">' +
+        "<div><dt>Diferença entre os dois " + UI.ajuda("diferenca") + "</dt><dd>" + votos(dif) + "<small>" + pontos(difPts, difPts < 1 ? 2 : 1) + " de diferença</small></dd></div>" +
+        "<div><dt>Votos válidos apurados " + UI.ajuda("votosValidos") + "</dt><dd>" + inteiro(r.validos) + "<small>só votos em candidatos</small></dd></div>" +
+        "<div><dt>Para vencer</dt><dd>Mais de 50%<small>dos votos válidos</small></dd></div></dl>";
     }
-    const comecou = r2 && r2.pctSecoes > 0;
-    $("comp-nota").textContent = TSE.NOMES[estado.recorte] + (r2 ? " · 2º turno com " + pctTxt(r2.pctSecoes) + " das seções" : "");
+    return html;
+  }
 
-    const linhas = par.map((f) => {
-      const c1 = r1 && TSE.candidato(r1, f.numero);
-      const c2 = comecou && TSE.candidato(r2, f.numero);
-      const c22 = r22 && TSE.candidato(r22, f.numero);
-      return {
-        rotulo: nomeCurto(f.nome) + " (" + f.numero + ")",
-        cor: cores[f.numero],
-        marcas: [
-          { forma: "oco", valor: c1 ? c1.pct : null, nome: "1º turno 2026" },
-          { forma: "cheio", valor: c2 ? c2.pct : null, nome: "2º turno 2026" + (r2 && !r2.finalizada ? " (parcial)" : "") },
-          { forma: "losango", valor: c22 ? c22.pct : null, nome: "2º turno 2022 · " + (c22 ? titulo(c22.nome) : "") },
-        ],
-      };
+  function blocoLista(r, par, P) {
+    const maximo = Math.max.apply(null, r.candidatos.map(function (c) { return c.pct || 0; }).concat([1]));
+    const linhas = r.candidatos.map(function (c) {
+      const fin = par.some(function (f) { return f.numero === c.numero; });
+      const papel = fin ? P[c.numero] : null;
+      const cor = papel ? fundo(papel) : "var(--outros)";
+      const marca = c.eleito ? '<span class="badge-2t">Eleito</span>' : fin ? '<span class="badge-2t">2º turno</span>' : "";
+      return '<div class="linha-cand" style="--cor:' + cor + '">' + fotoHtml(c, "federal1") +
+        '<div class="quem"><b>' + esc(nomeExibicao(c.nome)) + marca + "</b><small>" + esc(c.partido) + " · " + esc(c.numero) + "</small></div>" +
+        '<div class="valor"><b>' + pct(c.pct, 2) + "</b><small>" + (c.votos ? inteiro(c.votos) + " votos" : "") + "</small></div>" +
+        '<div class="trilho"><i style="width:' + ((c.pct || 0) / maximo) * 100 + "%;background:" + cor + '"></i></div></div>';
     });
-    const valores = [].concat.apply([], linhas.map((l) => l.marcas.map((m) => m.valor).filter((v) => v != null)));
-    const max = Math.min(100, Math.max(60, Math.ceil((Math.max.apply(null, valores.concat([0])) + 5) / 10) * 10));
-    const min = Math.max(0, Math.min(30, Math.floor((Math.min.apply(null, valores.concat([50])) - 5) / 10) * 10));
-    const ticks = [];
-    for (let t = min; t <= max; t += 10) ticks.push(t);
-    Graficos.pontos($("comp-grafico"), linhas, {
-      min: min, max: max, ticks: ticks, referencia: 50, margemEsquerda: 140,
-      fmt: (v, longo) => (longo ? pctTxt(v) : fmtN(v, 0) + "%"),
-      titulo: "Percentual de votos válidos de cada finalista no 1º e no 2º turno de 2026 e no 2º turno de 2022",
-    });
-    $("comp-legenda").innerHTML =
-      '<span class="item"><span class="forma">○</span>1º turno 2026</span>' +
-      '<span class="item"><span class="forma">●</span>2º turno 2026</span>' +
-      '<span class="item"><span class="forma">◆</span>2º turno 2022 (mesmo número)</span>' +
-      '<span class="item mudo">linha vertical = 50%</span>';
-
-    // Tabela de votos: quanto cada finalista ganhou do 1º para o 2º turno.
-    const linhasTab = [];
-    const celula = (votos, p) => "<td>" + (votos != null ? inteiro(votos) : "—") + (p != null ? "<small>" + pctTxt(p) + "</small>" : "") + "</td>";
-    let ganhoTotal = 0;
-    for (const f of par) {
-      const c1 = r1 && TSE.candidato(r1, f.numero);
-      const c2 = comecou ? TSE.candidato(r2, f.numero) : null;
-      const ganho = c1 && c2 ? c2.votos - c1.votos : null;
-      if (ganho != null) ganhoTotal += ganho;
-      linhasTab.push("<tr><td><span class=\"chave\" style=\"background:" + cores[f.numero] + '"></span>' + esc(nomeCurto(f.nome)) + "</td>" +
-        celula(c1 && c1.votos, c1 && c1.pct) + celula(c2 && c2.votos, c2 && c2.pct) +
-        "<td>" + (ganho != null ? sinal(ganho, 0) : "—") + (c1 && c2 ? "<small>" + pp(c2.pct - c1.pct) + "</small>" : "") + "</td></tr>");
-    }
-    if (r1 && !r1.reserva) {
-      const outros = r1.candidatos.filter((c) => !par.some((f) => f.numero === c.numero));
-      const votosOutros = outros.reduce((s, c) => s + c.votos, 0);
-      const pctOutros = r1.validos ? (votosOutros / r1.validos) * 100 : null;
-      linhasTab.push('<tr><td><span class="chave" style="background:var(--cinza-serie)"></span>Demais candidatos</td>' + celula(votosOutros, pctOutros) +
-        "<td>—</td><td>" + sinal(-votosOutros, 0) + "</td></tr>");
-      const extras = [
-        ["Brancos", "brancos", "pctBrancos"],
-        ["Nulos", "nulos", "pctNulos"],
-        ["Abstenção", "abstencao", "pctAbstencao"],
-      ];
-      for (const [nome, campo, campoPct] of extras) {
-        const v1 = r1[campo];
-        const v2 = comecou ? r2[campo] : null;
-        linhasTab.push("<tr><td>" + nome + "</td>" + celula(v1, r1[campoPct]) + celula(v2, comecou ? r2[campoPct] : null) +
-          "<td>" + (v2 != null && v1 != null ? sinal(v2 - v1, 0) : "—") + (comecou ? "<small>" + pp(r2[campoPct] - r1[campoPct]) + "</small>" : "") + "</td></tr>");
-      }
-    }
-    let nota = "";
-    if (comecou && r2.pctSecoes < 99.5) {
-      nota = '<p class="nota">Com a apuração em andamento, as diferenças em votos absolutos ainda vão crescer; compare os percentuais. A tabela fica comparável em votos com 100% das seções.</p>';
-    } else if (comecou && r1 && !r1.reserva) {
-      const outros = r1.candidatos.filter((c) => !par.some((f) => f.numero === c.numero)).reduce((s, c) => s + c.votos, 0);
-      nota = '<p class="nota">Os finalistas somaram ' + inteiro(ganhoTotal) + " votos a mais que no 1º turno, contra " + inteiro(outros) +
-        " votos válidos dados aos demais candidatos no 1º turno. A diferença vem também de mudanças em abstenção, brancos e nulos.</p>";
-    }
-    $("comp-tabela").innerHTML = "<table><thead><tr><th></th><th>1º turno</th><th>2º turno</th><th>Diferença</th></tr></thead><tbody>" +
-      linhasTab.join("") + "</tbody></table>" + nota;
+    return '<div class="lista-cand">' + linhas.join("") + "</div>" +
+      (r.reserva ? '<p class="nota">Aqui aparecem só os dois candidatos que foram ao 2º turno; a lista completa volta quando o arquivo do TSE puder ser lido.</p>' : "");
   }
 
-  // ---- Projeção ----------------------------------------------------------------
-  function renderProjecao() {
-    const alvo = $("projecao");
-    const br = estado.dados.federal2.br;
-    const par = finalistas();
-    if (!br || par.length < 2) {
-      alvo.innerHTML = '<p class="mudo">Aguardando o arquivo do 2º turno.</p>';
-      return;
-    }
-    if (!br.pctSecoes) {
-      alvo.innerHTML = '<p class="mudo">A projeção aparece quando o TSE publicar as primeiras seções apuradas.</p>';
-      return;
-    }
-    const cores = coresPara(par.map((c) => c.numero));
-    const numeros = par.map((c) => c.numero);
-    const porUf = {};
-    for (const uf of TSE.UFS.concat(["zz"])) porUf[uf] = estado.dados.federal2[uf];
-    const proj = TSE.projetar(porUf, numeros);
-    const a = TSE.candidato(br, numeros[0]);
-    const b = TSE.candidato(br, numeros[1]);
-    const lider = a.votos >= b.votos ? a : b;
-    const atras = lider === a ? b : a;
-    const restantesEleitores = br.eleitorado && br.eleitoradoApurado != null ? br.eleitorado - br.eleitoradoApurado : null;
-    const itens = [];
-    if (proj && !br.finalizada) {
-      for (const c of proj.candidatos) {
-        const f = par.find((x) => x.numero === c.numero);
-        itens.push({ rotulo: '<span class="chave" style="background:' + cores[c.numero] + '"></span>Projeção ' + esc(nomeCurto(f.nome)), valor: pctTxt(c.pct, 1), detalhe: "≈ " + milhoes(c.votos) + " votos" });
+  function renderHero() {
+    const alvo = $("hero");
+    const par = Dados.finalistas();
+    const r = resultadoDoTurno();
+    const sit = Dados.situacao();
+    const m = Texto.manchete({
+      turno: ui.turno,
+      status: !r ? (sit === "erro" ? "erro" : "carregando") : "ok",
+      resultado: r,
+      finalistas: par,
+      dataSegundoTurno: CFG.datas.turno2,
+    });
+    const P = par.length === 2 ? papeis(par.map(function (c) { return c.numero; })) : {};
+    const selo = seloEstado();
+
+    let html = '<div class="hero-topo"><div class="hero-meta"><span class="selo-estado ' + selo.classe + '">' + esc(selo.texto) + "</span>" +
+      "<span>" + ui.turno + "º turno · " + esc(CFG.datas["turno" + ui.turno]) + " de 2026</span></div>" +
+      '<div class="segmentado" role="group" aria-label="Escolher o turno">' +
+      '<button type="button" data-turno="1" aria-pressed="' + (ui.turno === 1) + '">1º turno</button>' +
+      '<button type="button" data-turno="2" aria-pressed="' + (ui.turno === 2) + '">2º turno</button></div></div>';
+
+    html += '<h2 class="manchete" id="resumo-titulo">' + juntarNomes(esc(m.titulo), par.map(function (c) { return c.nome; })) + '</h2><p class="lead">' + esc(m.texto) + "</p>";
+    if (m.aviso) html += '<p class="aviso-hero">' + UI.icone("info") + "<span>" + esc(m.aviso) + "</span></p>";
+
+    if (r && par.length === 2) {
+      html += ui.turno === 2 ? blocoDuelo(r, par, P) : blocoLista(r, par, P);
+
+      if (r.pctSecoes != null && (ui.turno === 2 || r.secoesTotal)) {
+        html += '<div class="progresso"><div class="progresso-topo"><span><b>' + pct(r.pctSecoes, 1) + "</b> das urnas apuradas " + UI.ajuda("urnas") + "</span>" +
+          "<span>" + (r.secoesTotal ? inteiro(r.secoesTotalizadas) + " de " + inteiro(r.secoesTotal) + " urnas" : "") + "</span></div>" +
+          '<div class="trilho" role="progressbar" aria-label="Urnas apuradas" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.round(r.pctSecoes) + '"><i style="width:' + Math.min(100, r.pctSecoes) + '%"></i></div></div>';
       }
-      const margemProj = Math.abs(proj.candidatos[0].votos - proj.candidatos[1].votos);
-      itens.push({ rotulo: "Margem projetada", valor: milhoes(margemProj), detalhe: "votos ao fim da apuração" });
-    }
-    if (!br.finalizada) {
-      const restantesValidos = proj ? proj.restantes : null;
-      itens.push({ rotulo: "Votos válidos a apurar", valor: milhoes(restantesValidos), detalhe: "estimativa pela proporção de cada UF" });
-      if (restantesEleitores != null) itens.push({ rotulo: "Eleitores em seções não apuradas", valor: milhoes(restantesEleitores), detalhe: inteiro(restantesEleitores) });
-      if (restantesValidos) {
-        const margemAtual = lider.votos - atras.votos;
-        const precisa = 50 + (margemAtual / restantesValidos) * 50;
-        itens.push({
-          rotulo: "Para virar, " + esc(nomeCurto(atras.nome)) + " precisa de",
-          valor: precisa > 100 ? "> 100%" : pctTxt(precisa, 1),
-          detalhe: precisa > 100 ? "dos válidos restantes (virada improvável pela estimativa)" : "dos válidos restantes (hoje tem " + pctTxt(atras.pct, 1) + ")",
-        });
-      }
+      const data = horaTse(r);
+      html += '<div class="hero-rodape"><span data-hora="' + (data ? data.getTime() : "") + '" data-rotulo="' + (r.reserva ? "Retrato salvo do 1º turno" : "Atualizado pelo TSE") + '"></span>' +
+        '<div class="hero-acoes"><select data-uf-rapido aria-label="Ver o resultado do meu estado">' + opcoesUf("Ver meu estado…") + "</select>" +
+        '<a href="#entenda">Como ler estes números</a></div></div>';
+    } else if (m.tipo === "erro") {
+      html += '<div class="vazio-msg" style="margin-top:20px"><b>Sem dados por enquanto</b><span>Assim que a conexão voltar, os números aparecem aqui.</span>' +
+        '<button type="button" class="botao" data-acao="atualizar">Tentar de novo</button></div>';
     } else {
-      itens.push({ rotulo: "Apuração encerrada", valor: pctTxt(lider.pct), detalhe: esc(titulo(lider.nome)) + " · resultado oficial do TSE" });
+      html += '<div class="duelo"><div class="esq" style="height:170px;border-radius:16px"></div><div class="esq" style="height:170px;border-radius:16px"></div></div>';
     }
-    alvo.innerHTML = '<div class="proj-grade">' + itens.map((i) =>
-      '<div class="proj-item"><div class="kpi-rotulo">' + i.rotulo + '</div><div class="kpi-valor">' + i.valor + '</div><div class="kpi-detalhe">' + i.detalhe + "</div></div>").join("") + "</div>" +
-      '<p class="nota">Como é feita: em cada estado e no Exterior, os votos já apurados são estendidos para 100% das seções mantendo a proporção atual daquele estado. ' +
-      "A estimativa erra quando as seções que faltam votam diferente das já apuradas (por exemplo, capitais e interior chegam em ritmos diferentes). Vale sempre o resultado do TSE.</p>";
+
+    alvo.innerHTML = html;
+    atualizarRelogio();
+    if (m.tipo !== "carregando") anunciar(m.titulo + ". " + m.texto);
+    let titulo = "Eleições 2026: apuração ao vivo para presidente";
+    if (r && par.length === 2 && ui.turno === 2 && r.pctSecoes > 0) {
+      const a = achar(r, par[0].numero);
+      const b = achar(r, par[1].numero);
+      if (a && b) titulo = nomeCurto(par[0].nome) + " " + fmtN(a.pct, 1) + "% × " + fmtN(b.pct, 1) + "% " + nomeCurto(par[1].nome) + " · Eleições 2026";
+    }
+    document.title = titulo;
   }
 
-  // ---- Mapa ----------------------------------------------------------------------
+  function atualizarRelogio() {
+    document.querySelectorAll("[data-hora]").forEach(function (no) {
+      const t = Number(no.dataset.hora);
+      if (!t) {
+        no.textContent = "";
+        return;
+      }
+      const d = new Date(t);
+      const dia = d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", timeZone: "America/Sao_Paulo" });
+      const hora = d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Sao_Paulo" });
+      let txt = no.dataset.rotulo + " em " + dia + " às " + hora + " (Brasília)";
+      const r = estado.dados.federal2.br;
+      if (ui.turno === 2) {
+        const atras = Texto.haQuanto(Date.now() - t);
+        if (atras) txt += " · " + atras;
+        if (r && !r.finalizada && estado.proximaLeitura && !estado.carregando) {
+          const s = Math.max(0, Math.round((estado.proximaLeitura - Date.now()) / 1000));
+          txt += " · próxima consulta em " + s + " s";
+        }
+      }
+      no.textContent = txt;
+    });
+  }
+
+  // ---- Indicadores ----------------------------------------------------------------------------------
+  /** ref = {de: "do 1º turno", a: "ao 1º turno"}: "acima do 1º turno", "igual ao 1º turno". */
+  function deltaHtml(atual, anterior, ref) {
+    if (atual == null || anterior == null) return "";
+    const d = atual - anterior;
+    if (Math.abs(d) < 0.05) return '<li class="delta"><i class="seta igual"></i><span>igual ' + ref.a + "</span></li>";
+    return '<li class="delta"><i class="seta ' + (d > 0 ? "cima" : "baixo") + '"></i><span><b>' + pontos(d) + "</b> " + (d > 0 ? "acima" : "abaixo") + " " + ref.de + "</span></li>";
+  }
+
+  function renderKpis() {
+    const r = resultadoDoTurno();
+    const alvo = $("kpis");
+    if (!r) return;
+    const comecou = r.pctSecoes > 0 && !r.reserva;
+    const comparacoes = ui.turno === 2
+      ? [{ r: Dados.resultado("federal1", "br"), ref: { de: "do 1º turno", a: "ao 1º turno" } }, { r: Dados.resultado("anterior2", "br"), ref: { de: "de 2022", a: "a 2022" } }]
+      : [{ r: Dados.resultado("anterior1", "br"), ref: { de: "do 1º turno de 2022", a: "ao 1º turno de 2022" } }];
+    const invalidos = function (x) { return x.pctBrancos != null && x.pctNulos != null ? x.pctBrancos + x.pctNulos : null; };
+    const deltas = function (campo, calculo) {
+      if (!comecou) return "";
+      const valor = calculo ? calculo(r) : r[campo];
+      return comparacoes.map(function (c) {
+        if (!c.r || c.r.reserva) return "";
+        return deltaHtml(valor, calculo ? calculo(c.r) : c.r[campo], c.ref);
+      }).join("");
+    };
+    const espera = "Aguardando as primeiras urnas";
+    const antes = comparacoes[comparacoes.length - 1].r;
+    let crescimento = "";
+    if (r.eleitorado && antes && antes.eleitorado) {
+      const v = ((r.eleitorado - antes.eleitorado) / antes.eleitorado) * 100;
+      crescimento = Math.abs(v) < 0.05
+        ? '<li class="delta"><i class="seta igual"></i><span>igual a 2022</span></li>'
+        : '<li class="delta"><i class="seta ' + (v > 0 ? "cima" : "baixo") + '"></i><span><b>' + pct(Math.abs(v), 1) + "</b> " + (v > 0 ? "a mais" : "a menos") + " que em 2022</span></li>";
+    }
+    const cartoes = [
+      {
+        rotulo: "Eleitorado", ajuda: "eleitorado", valor: r.eleitorado ? milhoes(r.eleitorado) : "—", barra: null,
+        desc: r.eleitorado ? inteiro(r.eleitorado) + " pessoas aptas a votar" : "", deltas: crescimento,
+      },
+      {
+        rotulo: "Comparecimento", ajuda: "comparecimento", valor: comecou ? pct(r.pctComparecimento, 1) : "—", barra: comecou ? r.pctComparecimento : null,
+        desc: comecou ? milhoes(r.comparecimento) + " de eleitores foram votar" : espera, deltas: deltas("pctComparecimento"),
+      },
+      {
+        rotulo: "Abstenção", ajuda: "abstencao", valor: comecou ? pct(r.pctAbstencao, 1) : "—", barra: comecou ? r.pctAbstencao : null,
+        desc: comecou ? milhoes(r.abstencao) + " de eleitores não foram votar" : espera, deltas: deltas("pctAbstencao"),
+      },
+      {
+        rotulo: "Brancos e nulos", ajuda: "brancosNulos", valor: comecou && invalidos(r) != null ? pct(invalidos(r), 1) : "—", barra: null,
+        desc: comecou ? pct(r.pctBrancos, 1) + " em branco e " + pct(r.pctNulos, 1) + " nulos" : espera, deltas: deltas(null, invalidos),
+      },
+    ];
+    alvo.innerHTML = cartoes.map(function (k) {
+      return '<article class="cartao kpi"><div class="kpi-cab"><h3>' + k.rotulo + "</h3>" + UI.ajuda(k.ajuda) + "</div>" +
+        '<p class="kpi-valor">' + k.valor + "</p>" +
+        (k.barra != null ? '<div class="kpi-barra" aria-hidden="true"><i style="width:' + Math.min(100, k.barra) + '%"></i></div>' : "") +
+        '<p class="kpi-desc">' + esc(k.desc) + "</p>" +
+        (k.deltas ? '<ul class="deltas">' + k.deltas + "</ul>" : "") + "</article>";
+    }).join("");
+    const parcial = ui.turno === 2 && comecou && !r.finalizada;
+    $("kpis-nota").textContent = parcial ? "Enquanto a apuração não termina, as comparações usam só as urnas já apuradas e podem mudar." : "";
+  }
+
+  // ---- Mapa -------------------------------------------------------------------------------------------------
   const MODOS = {
-    margem2: { tipo: "div", cortes: [2, 10, 20], explica: "Diferença, em pontos percentuais dos votos válidos, entre os dois finalistas no 2º turno. O número no quadrado é o do candidato à frente." },
-    margem1: { tipo: "div", cortes: [2, 10, 20], explica: "Diferença entre os dois finalistas no 1º turno, em pontos percentuais dos votos válidos (os outros candidatos também somam nos válidos)." },
-    virada: { tipo: "div", cortes: [1, 3, 6], explica: "Quanto a margem mudou do 1º para o 2º turno. A cor e o número indicam a favor de quem a margem andou." },
-    vs2022: { tipo: "div", cortes: [1, 3, 6], explica: "Quanto a margem do 2º turno de 2026 mudou em relação ao 2º turno de 2022, comparando candidatos pelo número do partido. A cor e o número indicam a favor de quem." },
-    abstencao: { tipo: "seq", explica: "Percentual de abstenção no 2º turno, sobre o eleitorado das seções já apuradas." },
-    apuracao: { tipo: "seq", explica: "Percentual das seções eleitorais já totalizadas pelo TSE no 2º turno." },
+    lider2: { tipo: "div", cortes: [2, 10, 20], verbo: "à frente por", explica: "A cor mostra quem tem mais votos em cada estado, e o tom indica a vantagem: quanto mais escuro, maior a diferença." },
+    lider1: { tipo: "div", cortes: [2, 10, 20], verbo: "à frente por", explica: "Mesma leitura, mas com o resultado do 1º turno (contando os votos de todos os candidatos)." },
+    osc1: { tipo: "div", cortes: [0.5, 2, 4], verbo: "ganhou", explica: "Compara só os votos dos dois finalistas no 1º turno com os do 2º. A cor mostra quem ganhou terreno em cada estado; quanto mais escuro, maior o ganho." },
+    osc22: { tipo: "div", cortes: [0.5, 2, 5], verbo: "ganhou", explica: "Compara com o 2º turno de 2022 usando o número dos partidos (PT e PL). A cor mostra quem ganhou terreno desde então." },
+    abst: { tipo: "seq", explica: "Quanto mais escuro, maior a abstenção entre as urnas já apuradas." },
+    urnas: { tipo: "seq", dominio: [0, 100], explica: "Quanto mais escuro, mais urnas do estado já foram apuradas." },
   };
 
-  function valorMapa(uf, numeros) {
+  function valorUf(uf, numeros) {
     const [a, b] = numeros;
     const r2 = estado.dados.federal2[uf];
     const r1 = estado.dados.federal1[uf];
     const r22 = estado.dados.anterior2[uf];
-    switch (estado.modoMapa) {
-      case "margem2": return TSE.margem(r2, a, b);
-      case "margem1": return TSE.margem(r1, a, b);
-      case "virada": {
-        const m2 = TSE.margem(r2, a, b);
-        const m1 = TSE.margem(r1, a, b);
-        return m2 != null && m1 != null ? m2 - m1 : null;
-      }
-      case "vs2022": {
-        const m2 = TSE.margem(r2, a, b);
-        const m22 = TSE.margem(r22, a, b);
-        return m2 != null && m22 != null ? m2 - m22 : null;
-      }
-      case "abstencao": return r2 && r2.pctSecoes ? r2.pctAbstencao : null;
-      case "apuracao": return r2 ? r2.pctSecoes : null;
+    const comecou = r2 && r2.pctSecoes > 0;
+    switch (ui.modoMapa) {
+      case "lider2": return comecou ? TSE.margem(r2, a, b) : null;
+      case "lider1": return r1 ? TSE.margem(r1, a, b) : null;
+      case "osc1": { const o = comecou && r1 ? TSE.oscilacao(r1, r2, a, b) : null; return o ? o.mudancaA : null; }
+      case "osc22": { const o = comecou && r22 ? TSE.oscilacao(r22, r2, a, b) : null; return o ? o.mudancaA : null; }
+      case "abst": return comecou ? r2.pctAbstencao : null;
+      case "urnas": return r2 ? r2.pctSecoes : null;
     }
     return null;
   }
 
-  function corMapa(v, numeros, cores, faixa) {
-    const modo = MODOS[estado.modoMapa];
-    if (v == null) return null;
-    if (modo.tipo === "div") {
-      const abs = Math.abs(v);
-      if (abs < modo.cortes[0]) return { fundo: "var(--neutro)", escuro: false };
-      const n = v > 0 ? numeros[0] : numeros[1];
-      const forca = abs < modo.cortes[1] ? 30 : abs < modo.cortes[2] ? 62 : 100;
-      return { fundo: forca === 100 ? cores[n] : "color-mix(in oklab, " + cores[n] + " " + forca + "%, var(--superficie))", escuro: forca === 100 };
+  function tomDiv(v, modo, numeros, P) {
+    const abs = Math.abs(v);
+    if (abs < modo.cortes[0]) return { fundo: "var(--surface-3)", texto: "var(--ink-2)", neutro: true, nivel: 0 };
+    const papel = P[v > 0 ? numeros[0] : numeros[1]];
+    const nivel = abs < modo.cortes[1] ? 1 : abs < modo.cortes[2] ? 2 : 3;
+    const mistura = ["", "var(--mix-1)", "var(--mix-2)", ""][nivel];
+    return {
+      fundo: nivel === 3 ? fundo(papel) : "color-mix(in oklab, " + fundo(papel) + " " + mistura + ", var(--surface))",
+      texto: nivel === 3 ? sobre(papel) : "var(--ink)",
+      nivel: nivel,
+    };
+  }
+
+  function calcularMapa() {
+    const par = Dados.finalistas();
+    if (par.length < 2) return null;
+    const numeros = par.map(function (c) { return c.numero; });
+    const P = papeis(numeros);
+    const nomes = apelidos(par[0].nome, par[1].nome);
+    const modo = MODOS[ui.modoMapa];
+    const ufs = UFS_VALIDAS.filter(function (u) { return u !== "br"; });
+    const valores = {};
+    ufs.forEach(function (uf) { valores[uf] = valorUf(uf, numeros); });
+
+    let dominio = modo.dominio;
+    if (modo.tipo === "seq" && !dominio) {
+      const lista = ufs.map(function (uf) { return valores[uf]; }).filter(function (v) { return v != null; });
+      dominio = lista.length ? [Math.min.apply(null, lista), Math.max.apply(null, lista)] : [0, 1];
     }
-    const [min, max] = faixa;
-    const t = max > min ? (v - min) / (max - min) : 1;
-    const forca = [18, 40, 65, 100][Math.min(3, Math.floor(t * 4))];
-    return { fundo: forca === 100 ? "var(--azul)" : "color-mix(in oklab, var(--azul) " + forca + "%, var(--superficie))", escuro: forca === 100 };
+
+    const estilos = {};
+    ufs.forEach(function (uf) {
+      const v = valores[uf];
+      if (v == null) {
+        estilos[uf] = null;
+        return;
+      }
+      if (modo.tipo === "div") {
+        const t = tomDiv(v, modo, numeros, P);
+        estilos[uf] = {
+          fundo: t.fundo, texto: t.texto,
+          valor: t.neutro ? "=" : fmtN(Math.abs(v), 1),
+          aria: t.neutro ? "situação equilibrada" : nomes[v > 0 ? 0 : 1] + " " + modo.verbo + " " + pontos(v, 1),
+        };
+      } else {
+        const [min, max] = dominio;
+        const k = max > min ? Math.min(4, Math.max(0, Math.floor(((v - min) / (max - min)) * 5))) : 4;
+        estilos[uf] = { fundo: "var(--seq-" + (k + 1) + ")", texto: "var(--on-seq-" + (k + 1) + ")", valor: fmtN(v, 1) + "%", aria: pct(v, 1) };
+      }
+    });
+    return { par: par, numeros: numeros, P: P, nomes: nomes, modo: modo, dominio: dominio, estilos: estilos };
+  }
+
+  function legendaMapa(m) {
+    const itens = [];
+    if (m.modo.tipo === "div") {
+      const c = m.modo.cortes;
+      const fmt = (x) => fmtN(x, x % 1 ? 1 : 0);
+      const rotulos = [fmt(c[0]) + " a " + fmt(c[1]) + " pts", fmt(c[1]) + " a " + fmt(c[2]) + " pts", "mais de " + fmt(c[2]) + " pts"];
+      m.par.forEach(function (f, i) {
+        const papel = m.P[f.numero];
+        const amostras = ["var(--mix-1)", "var(--mix-2)", ""].map(function (mist, k) {
+          const cor = !mist ? fundo(papel) : "color-mix(in oklab, " + fundo(papel) + " " + mist + ", var(--surface))";
+          return '<span class="item"><i class="amostra" style="background:' + cor + '"></i>' + rotulos[k] + "</span>";
+        }).join("");
+        itens.push('<li class="grupo"><b>' + esc(m.nomes[i]) + (m.modo.verbo === "ganhou" ? " ganhou" : " na frente por") + "</b>" + amostras + "</li>");
+      });
+      itens.push('<li><i class="amostra" style="background:var(--surface-3)"></i>Praticamente igual (menos de ' + fmt(c[0]) + (c[0] >= 2 ? " pontos" : " ponto") + ")</li>");
+    } else {
+      const [min, max] = m.dominio;
+      for (let i = 0; i < 5; i++) {
+        const de = min + ((max - min) * i) / 5;
+        const ate = min + ((max - min) * (i + 1)) / 5;
+        itens.push('<li><i class="amostra" style="background:var(--seq-' + (i + 1) + ')"></i>' + fmtN(de, 0) + "% a " + fmtN(ate, 0) + "%</li>");
+      }
+    }
+    itens.push('<li><i class="amostra" style="background:repeating-linear-gradient(45deg, var(--surface-2) 0 3px, var(--surface-3) 3px 6px)"></i>Sem dados ainda</li>');
+    return itens.join("");
+  }
+
+  function dicaUf(uf, m) {
+    const r2 = estado.dados.federal2[uf];
+    const r1 = Dados.resultado("federal1", uf);
+    const r22 = estado.dados.anterior2[uf];
+    const comecou = r2 && r2.pctSecoes > 0;
+    const linhas = m.par.map(function (f) {
+      const c2 = comecou ? achar(r2, f.numero) : null;
+      return '<div class="tip-linha"><span class="chave" style="--c:' + fundo(m.P[f.numero]) + '"></span>' + esc(nomeCurto(f.nome)) + "<b>" + (c2 ? pct(c2.pct, 2) : "—") + "</b></div>";
+    }).join("");
+    const lado = function (r) {
+      return m.par.map(function (f) { const c = achar(r, f.numero); return c ? fmtN(c.pct, 1) + "%" : "—"; }).join(" × ");
+    };
+    return '<div class="tip-titulo">' + esc(TSE.NOMES[uf]) + "</div>" + linhas +
+      '<div class="tip-linha tip-mudo"><span>1º turno</span><b>' + lado(r1) + "</b></div>" +
+      '<div class="tip-linha tip-mudo"><span>2º turno de 2022</span><b>' + lado(r22) + "</b></div>" +
+      '<div class="tip-linha tip-mudo"><span>Urnas apuradas</span><b>' + (r2 ? pct(r2.pctSecoes, 1) : "—") + "</b></div>" +
+      '<div class="tip-linha tip-mudo" style="margin-top:4px">Clique para ver os detalhes</div>';
   }
 
   function renderMapa() {
-    const par = finalistas();
-    const mapa = $("mapa");
-    if (par.length < 2) {
-      mapa.innerHTML = "";
+    const alvo = $("mapa-area");
+    const m = calcularMapa();
+    document.querySelectorAll("[data-visao]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.visao === ui.visaoMapa)); });
+    if (!m) {
+      alvo.innerHTML = '<div class="esq" style="height:420px;border-radius:16px"></div>';
+      $("mapa-legenda").innerHTML = "";
+      $("mapa-explica").textContent = "";
       return;
     }
-    const numeros = par.map((c) => c.numero);
-    const cores = coresPara(numeros);
-    const modo = MODOS[estado.modoMapa];
-    const valores = {};
-    for (const uf of TSE.UFS.concat(["zz"])) valores[uf] = valorMapa(uf, numeros);
-    const lista = TSE.UFS.map((uf) => valores[uf]).filter((v) => v != null);
-    const faixa = [Math.min.apply(null, lista), Math.max.apply(null, lista)];
-
-    const celulas = [];
-    for (let l = 0; l < 8; l++) for (let c = 0; c < 7; c++) celulas.push(null);
-    for (const uf in GRADE) celulas[GRADE[uf][0] * 7 + GRADE[uf][1]] = uf;
-    mapa.innerHTML = celulas.map((uf) => {
-      if (!uf) return '<div class="tile vazio"></div>';
-      const v = valores[uf];
-      const cor = corMapa(v, numeros, cores, faixa);
-      let texto = "—";
-      if (v != null) {
-        if (modo.tipo === "div") {
-          const n = Math.abs(v) < MODOS[estado.modoMapa].cortes[0] ? "" : (v > 0 ? numeros[0] : numeros[1]) + " ";
-          texto = n + (modo.cortes[0] === 1 ? "+" : "") + fmtN(Math.abs(v), 1);
-        } else texto = fmtN(v, 1) + "%";
-      }
-      const classes = "tile" + (cor ? (cor.escuro ? " escuro" : "") : " sem-dado") + (estado.recorte === uf ? " selecionado" : "");
-      const estilo = cor ? ' style="background:' + cor.fundo + '"' : "";
-      return '<button type="button" class="' + classes + '" data-uf="' + uf + '"' + estilo + ' aria-label="' + esc(TSE.NOMES[uf]) + ": " + esc(texto) + '"><span class="sigla">' + uf.toUpperCase() + '</span><span class="val">' + texto + "</span></button>";
-    }).join("");
-
-    mapa.querySelectorAll(".tile[data-uf]").forEach((t) => {
-      t.addEventListener("click", () => mudarRecorte(t.dataset.uf));
-      t.addEventListener("pointermove", (ev) => Graficos.mostrarTooltip(dicaUf(t.dataset.uf, numeros, cores), ev.clientX, ev.clientY));
-      t.addEventListener("pointerleave", Graficos.esconderTooltip);
+    Mapa.desenhar(alvo, {
+      visao: ui.visaoMapa,
+      estilo: function (uf) { return m.estilos[uf]; },
+      selecionado: ui.uf,
+      aoEscolher: function (uf) { escolherUf(uf === ui.uf && uf !== "br" ? "br" : uf, true); },
+      dica: function (uf) { return dicaUf(uf, m); },
     });
-
-    // Legenda
-    const leg = [];
-    if (modo.tipo === "div") {
-      const c = modo.cortes;
-      const faixas = [["≥ " + c[2], 100], [c[1] + " a " + c[2], 62], [c[0] + " a " + c[1], 30]];
-      for (const [i, n] of numeros.entries()) {
-        const f = par[i];
-        for (const [rot, forca] of i === 0 ? faixas : faixas.slice().reverse()) {
-          const fundo = forca === 100 ? cores[n] : "color-mix(in oklab, " + cores[n] + " " + forca + "%, var(--superficie))";
-          leg.push('<span class="item"><span class="amostra" style="background:' + fundo + '"></span>' + esc(nomeCurto(f.nome)) + " (" + n + ") à frente por " + rot + " p.p.</span>");
-        }
-        if (i === 0) leg.push('<span class="item"><span class="amostra" style="background:var(--neutro)"></span>Menos de ' + c[0] + " p.p. (equilíbrio)</span>");
-      }
-    } else if (lista.length) {
-      const passos = [18, 40, 65, 100];
-      passos.forEach((forca, i) => {
-        const de = faixa[0] + ((faixa[1] - faixa[0]) * i) / 4;
-        const ate = faixa[0] + ((faixa[1] - faixa[0]) * (i + 1)) / 4;
-        const fundo = forca === 100 ? "var(--azul)" : "color-mix(in oklab, var(--azul) " + forca + "%, var(--superficie))";
-        leg.push('<span class="item"><span class="amostra" style="background:' + fundo + '"></span>' + fmtN(de, 1) + "% a " + fmtN(ate, 1) + "%</span>");
-      });
-    }
-    leg.push('<span class="item"><span class="amostra" style="background:repeating-linear-gradient(45deg, var(--superficie-2) 0 4px, var(--superficie) 4px 8px)"></span>Sem dado</span>');
-    $("mapa-legenda").innerHTML = leg.join("");
-    $("mapa-explica").textContent = modo.explica + " Clique num estado para ver o detalhe. ZZ = Exterior.";
+    $("mapa-legenda").innerHTML = legendaMapa(m);
+    $("mapa-explica").innerHTML = esc(m.modo.explica) + (m.modo.tipo === "div" ? " Os números nos botões e nos quadrados são a diferença em pontos percentuais " + UI.ajuda("ponto") + "." : "") +
+      " Clique de novo no estado escolhido para voltar ao Brasil.";
   }
 
-  function dicaUf(uf, numeros, cores) {
+  // ---- Painel do estado ------------------------------------------------------------------------------------------
+  function nomesDuelo(a, b, P, par, nomeA, nomeB, valorA, valorB) {
+    return '<div class="duelo-mini-nomes">' +
+      '<div><span class="nm"><i class="chave" style="--c:' + fundo(P[par[0].numero]) + '"></i>' + esc(nomeA) + '</span><span class="pc">' + valorA + "</span></div>" +
+      '<div><span class="nm">' + esc(nomeB) + '<i class="chave" style="--c:' + fundo(P[par[1].numero]) + '"></i></span><span class="pc">' + valorB + "</span></div></div>";
+  }
+
+  function blocoSegundoTurno(par, P, r2) {
+    if (!r2 || !(r2.pctSecoes > 0)) {
+      return '<div class="vazio-msg"><b>A apuração aqui ainda não começou</b><span>Os números aparecem assim que o TSE divulgar as primeiras urnas deste local.</span></div>';
+    }
+    const a = achar(r2, par[0].numero);
+    const b = achar(r2, par[1].numero);
+    if (!a || !b) return "";
+    const dif = Math.abs(a.votos - b.votos);
+    const difPts = Math.abs(a.pct - b.pct);
+    const [nomeA, nomeB] = apelidos(par[0].nome, par[1].nome);
+    let frase;
+    if (a.votos === b.votos) frase = "Os dois candidatos estão empatados.";
+    else {
+      const lider = a.votos > b.votos ? nomeA : nomeB;
+      frase = "<b>" + esc(lider) + "</b> " + (r2.finalizada ? "ficou na frente" : "está na frente") + " por " + votos(dif) + " (" + pontos(difPts, difPts < 1 ? 2 : 1) + ").";
+    }
+    return nomesDuelo(a, b, P, par, nomeCurto(par[0].nome), nomeCurto(par[1].nome), pct(a.pct, 2), pct(b.pct, 2)) +
+      barraDupla({ pct: a.pct, cor: fundo(P[par[0].numero]) }, { pct: b.pct, cor: fundo(P[par[1].numero]) }, "barra-fina") +
+      '<p class="frase">' + frase + "</p>";
+  }
+
+  function blocoPrimeiroTurno(par, P, r1) {
+    const a = achar(r1, par[0].numero);
+    const b = achar(r1, par[1].numero);
+    if (!a || !b) return "";
+    const outros = Math.max(0, 100 - a.pct - b.pct);
+    return nomesDuelo(a, b, P, par, nomeCurto(par[0].nome), nomeCurto(par[1].nome), pct(a.pct, 2), pct(b.pct, 2)) +
+      '<div class="barra-fina" aria-hidden="true"><div class="seg a" style="width:' + a.pct + "%;background:" + fundo(P[par[0].numero]) + '"></div>' +
+      '<div class="seg" style="width:' + outros + '%;background:var(--outros)"></div>' +
+      '<div class="seg b" style="width:' + b.pct + "%;background:" + fundo(P[par[1].numero]) + '"></div></div>' +
+      '<p class="frase">Os outros candidatos somaram <b>' + pct(outros, 1) + "</b> dos votos válidos.</p>";
+  }
+
+  function blocoDe2022(par, P, r22) {
+    const a = achar(r22, par[0].numero);
+    const b = achar(r22, par[1].numero);
+    if (!a || !b) return "";
+    return nomesDuelo(a, b, P, par, nomeCurto(a.nome), nomeCurto(b.nome), pct(a.pct, 2), pct(b.pct, 2)) +
+      barraDupla({ pct: a.pct, cor: fundo(P[par[0].numero]) }, { pct: b.pct, cor: fundo(P[par[1].numero]) }, "barra-fina");
+  }
+
+  function renderPainelUf() {
+    const uf = ui.uf;
+    const par = Dados.finalistas();
+    $("painel-titulo").textContent = TSE.NOMES[uf];
+    $("uf-select").value = uf;
+    const corpo = $("painel-uf-corpo");
+    if (par.length < 2) {
+      corpo.innerHTML = '<div class="esq" style="height:240px"></div>';
+      return;
+    }
+    const P = papeis(par.map(function (c) { return c.numero; }));
     const r2 = estado.dados.federal2[uf];
-    const r1 = estado.dados.federal1[uf];
-    const r22 = estado.dados.anterior2[uf];
-    const linhas = numeros.map((n) => {
-      const c2 = r2 && r2.pctSecoes ? TSE.candidato(r2, n) : null;
-      const c1 = r1 ? TSE.candidato(r1, n) : null;
-      const c22 = r22 ? TSE.candidato(r22, n) : null;
-      const nome = (c2 || c1 || { nome: n }).nome;
-      return '<div class="tip-linha"><span class="chave" style="background:' + cores[n] + '"></span>' + esc(nomeCurto(nome)) + "<b>" + (c2 ? pctTxt(c2.pct) : "—") + "</b></div>" +
-        '<div class="tip-linha tip-mudo pequeno">1º turno ' + (c1 ? pctTxt(c1.pct) : "—") + " · 2022 " + (c22 ? pctTxt(c22.pct) : "—") + "</div>";
-    });
-    return '<div class="tip-titulo">' + esc(TSE.NOMES[uf]) + "</div>" + linhas.join("") +
-      '<div class="tip-linha tip-mudo pequeno">Seções apuradas<b>' + (r2 ? pctTxt(r2.pctSecoes) : "—") + "</b></div>" +
-      '<div class="tip-linha tip-mudo pequeno">Abstenção<b>' + (r2 && r2.pctSecoes ? pctTxt(r2.pctAbstencao) : "—") + "</b></div>";
+    const r1 = Dados.resultado("federal1", uf);
+    const r22 = Dados.resultado("anterior2", uf);
+    const comecou = r2 && r2.pctSecoes > 0;
+
+    const sub = [];
+    if (comecou) sub.push(pct(r2.pctSecoes, 1) + " das urnas apuradas");
+    const eleitorado = r2 && r2.eleitorado ? r2.eleitorado : r1 && r1.eleitorado ? r1.eleitorado : null;
+    if (eleitorado) sub.push(milhoes(eleitorado) + " de eleitores");
+    $("painel-sub").textContent = sub.join(" · ");
+
+    let html = '<div class="bloco"><h4>2º turno ' + (comecou && !r2.finalizada ? "<small>resultado parcial</small>" : "") + "</h4>" + blocoSegundoTurno(par, P, r2) + "</div>";
+
+    if (comecou && r1 && !r1.reserva) {
+      const osc = TSE.oscilacao(r1, r2, par[0].numero, par[1].numero);
+      const f = osc ? Texto.fraseOscilacao(par[0].nome, par[1].nome, osc, !r2.finalizada) : null;
+      if (f) html += '<div class="bloco"><h4>Mudança desde o 1º turno ' + UI.ajuda("oscilacao") + '</h4><p class="frase" style="margin-top:0"><b>' + esc(f.destaque) + ".</b> " + esc(f.detalhe) + "</p></div>";
+    }
+    if (r1) html += '<div class="bloco"><h4>1º turno <small>' + esc(CFG.datas.turno1) + "</small></h4>" + blocoPrimeiroTurno(par, P, r1) + "</div>";
+    if (r22) html += '<div class="bloco"><h4>2º turno de 2022</h4>' + blocoDe2022(par, P, r22) + "</div>";
+
+    const base = comecou ? r2 : r1;
+    if (base && base.pctComparecimento != null) {
+      const inv = base.pctBrancos != null && base.pctNulos != null ? base.pctBrancos + base.pctNulos : null;
+      html += '<div class="bloco"><h4>Participação ' + (comecou ? "no 2º turno" : "no 1º turno") + '</h4><dl class="lista-dl">' +
+        "<div><dt>Comparecimento " + UI.ajuda("comparecimento") + "</dt><dd>" + pct(base.pctComparecimento, 1) + "<small>" + milhoes(base.comparecimento) + "</small></dd></div>" +
+        "<div><dt>Abstenção " + UI.ajuda("abstencao") + "</dt><dd>" + pct(base.pctAbstencao, 1) + "<small>" + milhoes(base.abstencao) + "</small></dd></div>" +
+        "<div><dt>Brancos e nulos " + UI.ajuda("brancosNulos") + "</dt><dd>" + pct(inv, 1) + "</dd></div></dl></div>";
+    }
+    corpo.innerHTML = html;
   }
 
-  // ---- Tabela por UF ---------------------------------------------------------------
-  function renderTabelaUfs() {
-    const par = finalistas();
+  function escolherUf(uf, rolar) {
+    ui.uf = uf;
+    atualizarUrl();
+    renderMapa();
+    renderPainelUf();
+    renderTabela();
+    if (rolar) garantirVisivel($("painel-uf"));
+  }
+
+  // ---- Tabela de estados -------------------------------------------------------------------------------------------
+  const semAcento = (t) => String(t).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+
+  function renderTabela() {
+    const alvo = $("tabela-ufs");
+    const par = Dados.finalistas();
     if (par.length < 2) {
-      $("tabela-ufs").innerHTML = "";
+      alvo.innerHTML = "";
       return;
     }
-    const [a, b] = par.map((c) => c.numero);
-    const cores = coresPara([a, b]);
-    const nA = esc(nomeCurto(par[0].nome));
-    const nB = esc(nomeCurto(par[1].nome));
-    const colunas = [
-      { id: "uf", rotulo: "Estado" },
-      { id: "secoes", rotulo: "Seções" },
-      { id: "a2", rotulo: nA + " 2º t." },
-      { id: "b2", rotulo: nB + " 2º t." },
-      { id: "m2", rotulo: "Margem 2º t." },
-      { id: "a1", rotulo: nA + " 1º t." },
-      { id: "b1", rotulo: nB + " 1º t." },
-      { id: "virada", rotulo: "Δ margem 1º→2º" },
-      { id: "m22", rotulo: "Margem 2022" },
-      { id: "abst", rotulo: "Abstenção" },
-      { id: "eleitorado", rotulo: "Eleitorado" },
-    ];
+    const [a, b] = par.map(function (c) { return c.numero; });
+    const P = papeis([a, b]);
+    const nomes = apelidos(par[0].nome, par[1].nome);
+
     function linha(uf) {
       const r2 = estado.dados.federal2[uf];
-      const r1 = resultado("federal1", uf);
-      const r22 = resultado("anterior2", uf);
+      const r1 = Dados.resultado("federal1", uf);
       const comecou = r2 && r2.pctSecoes > 0;
-      const c = (r, n) => (r ? TSE.candidato(r, n) : null);
-      const m2 = TSE.margem(r2, a, b);
-      const m1 = TSE.margem(r1, a, b);
+      const ca = comecou ? achar(r2, a) : null;
+      const cb = comecou ? achar(r2, b) : null;
+      const margem = comecou ? TSE.margem(r2, a, b) : null;
+      const osc = comecou && r1 && !r1.reserva ? TSE.oscilacao(r1, r2, a, b) : null;
       return {
-        uf: uf,
-        nome: TSE.NOMES[uf],
-        secoes: r2 ? r2.pctSecoes : null,
-        a2: comecou && c(r2, a) ? c(r2, a).pct : null,
-        b2: comecou && c(r2, b) ? c(r2, b).pct : null,
-        m2: m2,
-        a1: c(r1, a) ? c(r1, a).pct : null,
-        b1: c(r1, b) ? c(r1, b).pct : null,
-        virada: m2 != null && m1 != null ? m2 - m1 : null,
-        m22: TSE.margem(r22, a, b),
-        abst: comecou ? r2.pctAbstencao : null,
-        eleitorado: r2 ? r2.eleitorado : r1 ? r1.eleitorado : null,
+        uf: uf, nome: TSE.NOMES[uf], urnas: r2 ? r2.pctSecoes : null, margem: margem, difAbs: margem == null ? null : Math.abs(margem),
+        a: ca ? ca.pct : null, b: cb ? cb.pct : null, osc: osc ? osc.mudancaA : null, abst: comecou ? r2.pctAbstencao : null,
       };
     }
-    const dados = TSE.UFS.concat(["zz"]).map(linha);
-    const { coluna, desc } = estado.ordem;
-    dados.sort((x, y) => {
-      if (coluna === "uf") return x.nome.localeCompare(y.nome, "pt-BR") * (desc ? -1 : 1);
+
+    const colunas = [
+      { id: "nome", rotulo: "Estado" },
+      { id: "urnas", rotulo: "Urnas apuradas" },
+      { id: "margem", rotulo: "Na frente" },
+      { id: "difAbs", rotulo: "Diferença (pontos)" },
+      { id: "a", rotulo: nomes[0] },
+      { id: "b", rotulo: nomes[1] },
+      { id: "osc", rotulo: "Ganhou terreno desde o 1º turno" },
+      { id: "abst", rotulo: "Abstenção" },
+    ];
+
+    const filtro = semAcento(ui.filtro.trim());
+    const dados = TSE.UFS.concat(["zz"]).map(linha).filter(function (d) {
+      return !filtro || semAcento(d.nome).indexOf(filtro) >= 0 || d.uf.indexOf(filtro) === 0;
+    });
+    const { coluna, desc } = ui.ordem;
+    dados.sort(function (x, y) {
+      if (coluna === "nome") return x.nome.localeCompare(y.nome, "pt-BR") * (desc ? -1 : 1);
       const vx = x[coluna];
       const vy = y[coluna];
-      if (vx == null && vy == null) return 0;
+      if (vx == null && vy == null) return x.nome.localeCompare(y.nome, "pt-BR");
       if (vx == null) return 1;
       if (vy == null) return -1;
-      return (vx - vy) * (desc ? -1 : 1);
+      return (vx - vy) * (desc ? -1 : 1) || x.nome.localeCompare(y.nome, "pt-BR");
     });
-    const total = linha("br");
-    const fmtMargem = (v) => {
-      if (v == null) return "—";
-      const n = v > 0 ? a : b;
-      return Math.abs(v) < 0.005 ? "0,0" : '<span class="chave" style="background:' + cores[n] + '"></span>' + n + " +" + fmtN(Math.abs(v), 1);
+
+    const quem = function (v) {
+      const k = v > 0 ? 0 : 1;
+      return '<i class="chave" style="--c:' + fundo(P[par[k].numero]) + '"></i>' + esc(nomes[k]);
     };
-    const celulas = (d) => [
-      "<td>" + esc(d.nome) + "</td>",
-      "<td>" + pctTxt(d.secoes, 1) + "</td>",
-      "<td>" + pctTxt(d.a2) + "</td>",
-      "<td>" + pctTxt(d.b2) + "</td>",
-      "<td>" + fmtMargem(d.m2) + "</td>",
-      "<td>" + pctTxt(d.a1) + "</td>",
-      "<td>" + pctTxt(d.b1) + "</td>",
-      "<td>" + fmtMargem(d.virada) + "</td>",
-      "<td>" + fmtMargem(d.m22) + "</td>",
-      "<td>" + pctTxt(d.abst, 1) + "</td>",
-      "<td>" + milhoes(d.eleitorado) + "</td>",
-    ].join("");
-    const cab = colunas.map((col) => {
-      const ativo = col.id === coluna;
-      return '<th class="ordenavel" data-col="' + col.id + '"' + (ativo ? ' aria-sort="' + (desc ? "descending" : "ascending") + '"' : "") + ">" + col.rotulo + "</th>";
+    const celulaLider = (margem) => margem == null ? "—" : Math.abs(margem) < 0.05 ? "Empate" : '<span class="cel-lider">' + quem(margem) + "</span>";
+    const celulaOsc = (v) => v == null ? "—" : Math.abs(v) < 0.05 ? "igual" : '<span class="cel-lider">' + quem(v) + " " + fmtN(Math.abs(v), 1) + "</span>";
+    const celulas = function (d) {
+      return "<td><b>" + esc(d.nome) + "</b></td>" +
+        '<td><div class="cel-urnas"><span>' + pct(d.urnas, 1) + '</span><div class="trilho" aria-hidden="true"><i style="width:' + (d.urnas || 0) + '%"></i></div></div></td>' +
+        "<td>" + celulaLider(d.margem) + "</td><td>" + (d.difAbs == null ? "—" : fmtN(d.difAbs, 1)) + "</td>" +
+        "<td>" + pct(d.a, 1) + "</td><td>" + pct(d.b, 1) + "</td><td>" + celulaOsc(d.osc) + "</td><td>" + pct(d.abst, 1) + "</td>";
+    };
+
+    const cab = colunas.map(function (c) {
+      const ativo = c.id === coluna;
+      return '<th scope="col" class="ord"' + (ativo ? ' aria-sort="' + (desc ? "descending" : "ascending") + '"' : "") + '><button type="button" class="ord-btn" data-col="' + c.id + '">' + esc(c.rotulo) + "</button></th>";
     }).join("");
-    $("tabela-ufs").innerHTML = "<table><thead><tr>" + cab + "</tr></thead><tbody>" +
-      '<tr class="destaque clicavel' + (estado.recorte === "br" ? " selecionado" : "") + '" data-uf="br">' + celulas(total) + "</tr>" +
-      dados.map((d) => '<tr class="clicavel' + (estado.recorte === d.uf ? " selecionado" : "") + '" data-uf="' + d.uf + '">' + celulas(d) + "</tr>").join("") +
-      "</tbody></table>";
-    $("tabela-ufs").querySelectorAll("th[data-col]").forEach((th) => th.addEventListener("click", () => {
-      const col = th.dataset.col;
-      estado.ordem = { coluna: col, desc: estado.ordem.coluna === col ? !estado.ordem.desc : col !== "uf" };
-      renderTabelaUfs();
-    }));
-    $("tabela-ufs").querySelectorAll("tr[data-uf]").forEach((tr) => tr.addEventListener("click", () => mudarRecorte(tr.dataset.uf)));
+
+    const total = filtro ? "" : '<tr class="total' + (ui.uf === "br" ? " sel" : "") + '" tabindex="0" data-uf="br">' + celulas(linha("br")) + "</tr>";
+    const corpo = dados.length
+      ? dados.map(function (d) { return '<tr class="' + (ui.uf === d.uf ? "sel" : "") + '" tabindex="0" data-uf="' + d.uf + '">' + celulas(d) + "</tr>"; }).join("")
+      : '<tr class="vazio-linha"><td colspan="8">Nenhum estado encontrado para “' + esc(ui.filtro) + "”.</td></tr>";
+    alvo.innerHTML = '<caption class="so-leitor">Resultado do 2º turno por estado</caption><thead><tr>' + cab + "</tr></thead><tbody>" + total + corpo + "</tbody>";
   }
 
-  // ---- Regiões ------------------------------------------------------------------------
-  function renderRegioes() {
-    const par = finalistas();
-    if (par.length < 2) return;
-    const numeros = par.map((c) => c.numero);
-    const cores = coresPara(numeros);
-    const linhas = [];
-    for (const reg of TSE.REGIOES) {
-      const s2 = TSE.somar(reg.ufs.map((uf) => estado.dados.federal2[uf]));
-      const s1 = TSE.somar(reg.ufs.map((uf) => estado.dados.federal1[uf]));
-      const parte = (s, n) => {
-        const c = s && TSE.candidato(s, n);
-        const f = par.find((x) => x.numero === n);
-        return { nome: nomeCurto(f.nome), valor: c ? c.pct : 0, cor: cores[n], texto: c ? fmtN(c.pct, 1) + "%" : "", textoLongo: c ? pctTxt(c.pct) + " · " + inteiro(c.votos) + " votos" : "" };
+  // ---- 1º × 2º turno -------------------------------------------------------------------------------------------------------------
+  function renderComparar() {
+    const alvo = $("comparar-corpo");
+    const par = Dados.finalistas();
+    const r1 = Dados.resultado("federal1", "br");
+    const r2 = estado.dados.federal2.br;
+    const r22 = Dados.resultado("anterior2", "br");
+    if (par.length < 2 || !r1) {
+      alvo.innerHTML = '<div class="cartao"><div class="esq" style="height:200px"></div></div>';
+      return;
+    }
+    const numeros = par.map(function (c) { return c.numero; });
+    const P = papeis(numeros);
+    const comecou = r2 && r2.pctSecoes > 0;
+    const parcial = comecou && !r2.finalizada;
+
+    const parte = function (r, f) {
+      const c = achar(r, f.numero);
+      if (!c) return null;
+      return {
+        nome: nomeExibicao(c.nome), valor: c.pct, cor: fundo(P[f.numero]), sobre: sobre(P[f.numero]), texto: fmtN(c.pct, 1) + "%",
+        textoLongo: pct(c.pct, 2) + (c.votos ? " · " + inteiro(c.votos) + " votos" : ""), nomeNoSegmento: nomeCurto(c.nome),
       };
-      if (s2 && s2.pctSecoes > 0) {
-        linhas.push({ rotulo: "<b>" + reg.nome + "</b><small>2º turno · " + pctTxt(s2.pctSecoes, 0) + " seções</small>", dica: reg.nome + " · 2º turno", partes: numeros.map((n) => parte(s2, n)) });
-      } else {
-        linhas.push({ rotulo: "<b>" + reg.nome + "</b><small>2º turno · aguardando</small>", partes: [] });
-      }
-      if (s1) {
-        const outros = s1.candidatos.filter((c) => numeros.indexOf(c.numero) < 0).reduce((s, c) => s + (c.pct || 0), 0);
-        linhas.push({
-          rotulo: "<small>1º turno</small>",
-          dica: reg.nome + " · 1º turno",
-          partes: [parte(s1, numeros[0]), { nome: "Demais candidatos", valor: outros, cor: "var(--cinza-serie)", claro: true, texto: fmtN(outros, 1) + "%", textoLongo: pctTxt(outros) }, parte(s1, numeros[1])],
-        });
-      }
+    };
+    const a1 = achar(r1, numeros[0]);
+    const b1 = achar(r1, numeros[1]);
+    const outros1 = a1 && b1 ? Math.max(0, 100 - a1.pct - b1.pct) : null;
+
+    const linhas = [{
+      rotulo: "<b>1º turno</b>" + esc(CFG.datas.turno1),
+      dica: "1º turno de 2026",
+      partes: [parte(r1, par[0]), outros1 ? { nome: "Outros candidatos", valor: outros1, cor: "var(--outros)", sobre: "var(--on-outros)", texto: fmtN(outros1, 1) + "%", textoLongo: pct(outros1, 2) } : null, parte(r1, par[1])].filter(Boolean),
+    }];
+    if (comecou) {
+      linhas.push({
+        rotulo: "<b>2º turno</b>" + esc(CFG.datas.turno2) + (parcial ? "<br>parcial · " + pct(r2.pctSecoes, 0) + " das urnas" : ""),
+        dica: "2º turno de 2026" + (parcial ? " (parcial)" : ""),
+        partes: [parte(r2, par[0]), parte(r2, par[1])].filter(Boolean),
+      });
     }
-    Graficos.barras100($("regioes"), linhas, { meio: true });
-    $("regioes-legenda").innerHTML = par.map((f) => '<span class="item"><span class="amostra" style="background:' + cores[f.numero] + '"></span>' + esc(nomeCurto(f.nome)) + " (" + f.numero + ")</span>").join("") +
-      '<span class="item"><span class="amostra" style="background:var(--cinza-serie)"></span>Demais candidatos (1º turno)</span><span class="item mudo">traço = 50%</span>';
+    if (r22) {
+      linhas.push({
+        rotulo: "<b>2º turno de 2022</b>30 de outubro",
+        dica: "2º turno de 2022",
+        partes: [parte(r22, par[0]), parte(r22, par[1])].filter(Boolean),
+      });
+    }
+
+    const osc = comecou ? TSE.oscilacao(r1, r2, numeros[0], numeros[1]) : null;
+    const f = osc ? Texto.fraseOscilacao(par[0].nome, par[1].nome, osc, parcial) : null;
+
+    let html = '<div class="cartao"><div class="cartao-cab"><div><h3>Como os votos se dividiram</h3>' +
+      '<p class="cartao-sub">Cada barra é 100% dos votos válidos. O trecho cinza reúne os candidatos que não chegaram ao 2º turno. O traço no meio marca 50%.</p></div></div>' +
+      '<div id="comp-barras"></div>' +
+      '<ul class="legenda"><li><i class="amostra" style="background:' + fundo(P[numeros[0]]) + '"></i>' + esc(nomeExibicao(par[0].nome)) + "</li>" +
+      '<li><i class="amostra" style="background:' + fundo(P[numeros[1]]) + '"></i>' + esc(nomeExibicao(par[1].nome)) + "</li>" +
+      '<li><i class="amostra" style="background:var(--outros)"></i>Outros candidatos do 1º turno</li></ul>' +
+      '<p class="nota">As cores seguem os partidos: ' + esc(par[0].partido) + " em " + P[numeros[0]] + " e " + esc(par[1].partido) + " em " + P[numeros[1]] + ". Por isso a barra de 2022 mostra " +
+      esc(achar(r22, numeros[0]) ? nomeExibicao(achar(r22, numeros[0]).nome) : "o candidato do " + par[0].partido) + ", que era do " + esc(par[0].partido) + ".</p></div>";
+
+    html += '<div class="insights"><article class="cartao insight"><div class="insight-rotulo">Quem ganhou terreno? ' + UI.ajuda("oscilacao") + "</div>" +
+      (f
+        ? '<p class="insight-destaque">' + esc(f.destaque) + "</p><p>" + esc(f.detalhe) + "</p>"
+        : '<p class="insight-destaque">Aguardando o 2º turno</p><p>Quando a apuração começar, aqui aparece quem ganhou apoio em relação ao 1º turno.</p>') + "</article>";
+    if (outros1 != null) {
+      html += '<article class="cartao insight"><div class="insight-rotulo">E os outros candidatos do 1º turno?</div><p class="insight-destaque">' + pct(outros1, 1) + " dos votos válidos</p><p>" + esc(Texto.fraseOutros(outros1)) + "</p></article>";
+    }
+    html += "</div>";
+
+    // Tabela completa
+    const cel = (v, p) => "<td>" + (v != null ? inteiro(v) : "—") + (p != null ? "<small>" + pct(p, 2) + "</small>" : "") + "</td>";
+    const linhasTab = par.map(function (fp) {
+      const c1 = achar(r1, fp.numero);
+      const c2 = comecou ? achar(r2, fp.numero) : null;
+      const dif = c1 && c2 ? c2.votos - c1.votos : null;
+      return '<tr><td><span class="cel-lider"><i class="chave" style="--c:' + fundo(P[fp.numero]) + '"></i>' + esc(nomeExibicao(fp.nome)) + "</span></td>" +
+        cel(c1 && c1.votos, c1 && c1.pct) + cel(c2 && c2.votos, c2 && c2.pct) + "<td>" + (dif != null ? sinal(dif, 0) : "—") + "</td></tr>";
+    });
+    if (outros1 != null && !r1.reserva) {
+      const votosOutros = r1.candidatos.filter(function (c) { return numeros.indexOf(c.numero) < 0; }).reduce(function (s, c) { return s + c.votos; }, 0);
+      linhasTab.push('<tr><td><span class="cel-lider"><i class="chave" style="--c:var(--outros)"></i>Outros candidatos</span></td>' + cel(votosOutros, outros1) + "<td>—</td><td>" + sinal(-votosOutros, 0) + "</td></tr>");
+    }
+    if (!r1.reserva) {
+      [["Brancos", "brancos", "pctBrancos"], ["Nulos", "nulos", "pctNulos"], ["Abstenção", "abstencao", "pctAbstencao"]].forEach(function (c) {
+        const v1 = r1[c[1]];
+        const v2 = comecou ? r2[c[1]] : null;
+        linhasTab.push("<tr><td>" + c[0] + "</td>" + cel(v1, r1[c[2]]) + cel(v2, comecou ? r2[c[2]] : null) + "<td>" + (v1 != null && v2 != null ? sinal(v2 - v1, 0) : "—") + "</td></tr>");
+      });
+    }
+    html += '<details class="detalhes"><summary>Ver todos os números em tabela</summary><div class="tabela-wrap"><table class="tabela"><thead><tr><th scope="col">Votos</th><th scope="col">1º turno</th><th scope="col">2º turno' +
+      (parcial ? " (parcial)" : "") + '</th><th scope="col">Diferença em votos</th></tr></thead><tbody>' + linhasTab.join("") + "</tbody></table></div>" +
+      (parcial ? '<p class="nota">Com a apuração em andamento, as diferenças em votos ainda vão crescer. Compare os percentuais.</p>' : "") + "</details>";
+
+    alvo.innerHTML = html;
+    Graficos.barras100($("comp-barras"), linhas, { meio: true });
   }
 
-  // ---- Evolução da apuração --------------------------------------------------------
-  function chaveEvolucao() {
-    return "painel:evolucao:" + estado.eleicoes.federal2.codigo;
-  }
-  function lerEvolucao() {
-    try {
-      return JSON.parse(localStorage.getItem(chaveEvolucao()) || "[]");
-    } catch (e) {
-      return [];
-    }
-  }
-  function registrarEvolucao() {
+  // ---- O que falta ------------------------------------------------------------------------------------------------------------------------------
+  function renderProjecao() {
+    const alvo = $("projecao-corpo");
     const br = estado.dados.federal2.br;
-    if (!br || !br.pctSecoes) return;
-    const pontos = lerEvolucao();
-    const ultimo = pontos[pontos.length - 1];
-    if (ultimo && ultimo.dg === br.dg && ultimo.hg === br.hg) return;
-    const v = {};
-    for (const c of br.candidatos) v[c.numero] = c.pct;
-    pontos.push({ dg: br.dg, hg: br.hg, pst: br.pctSecoes, v: v });
-    while (pontos.length > 500) pontos.shift();
-    try {
-      localStorage.setItem(chaveEvolucao(), JSON.stringify(pontos));
-    } catch (e) {
-      /* sem armazenamento */
+    const par = Dados.finalistas();
+    if (!br || par.length < 2) {
+      alvo.innerHTML = '<div class="esq" style="height:200px"></div>';
+      return;
     }
+    if (!br.pctSecoes) {
+      alvo.innerHTML = '<div class="vazio-msg"><b>A apuração ainda não começou</b><span>Quando o TSE divulgar as primeiras urnas, aqui aparece quanto falta contar e uma estimativa do resultado final.</span></div>';
+      return;
+    }
+    const numeros = par.map(function (c) { return c.numero; });
+    const P = papeis(numeros);
+    const nomes = apelidos(par[0].nome, par[1].nome);
+    const a = achar(br, numeros[0]);
+    const b = achar(br, numeros[1]);
+    if (br.finalizada) {
+      const lider = a.votos >= b.votos ? a : b;
+      alvo.innerHTML = '<div class="proj-item"><h4>Apuração encerrada</h4><p class="proj-valor">100% das urnas</p><p>Todas as urnas foram apuradas. ' +
+        (lider.eleito ? esc(nomeExibicao(lider.nome)) + " foi eleito, segundo o TSE." : "A proclamação oficial do resultado é feita pelo TSE.") + "</p></div>";
+      return;
+    }
+    const porUf = {};
+    TSE.UFS.concat(["zz"]).forEach(function (uf) { porUf[uf] = estado.dados.federal2[uf]; });
+    const proj = TSE.projetar(porUf, numeros);
+    const falta = Math.max(0, 100 - br.pctSecoes);
+    const itens = ['<div class="proj-item"><h4>Quanto falta contar ' + UI.ajuda("urnas") + '</h4><p class="proj-valor">' + pct(falta, 1) + " das urnas</p><p>" +
+      (proj ? "Isso equivale a cerca de " + milhoes(proj.restantes) + " de votos válidos ainda não somados." : "") +
+      '</p><div class="trilho" style="margin-top:12px" aria-hidden="true"><i style="width:' + (100 - falta) + '%"></i></div></div>'];
+
+    if (proj) {
+      const pa = proj.candidatos[0];
+      const pb = proj.candidatos[1];
+      itens.push('<div class="proj-item"><h4>Resultado final estimado ' + UI.ajuda("projecao") + '</h4><div class="proj-versus"><div><small>' + esc(nomes[0]) + "</small>" + pct(pa.pct, 1) +
+        "</div><div><small>" + esc(nomes[1]) + "</small>" + pct(pb.pct, 1) + "</div></div>" +
+        barraDupla({ pct: pa.pct, cor: fundo(P[numeros[0]]) }, { pct: pb.pct, cor: fundo(P[numeros[1]]) }, "barra-fina") +
+        "<p>Estimativa deste painel, não do TSE: se os votos que faltam seguirem o padrão de cada estado, o resultado final ficaria perto disso.</p></div>");
+
+      if (proj.restantes > 0 && a.votos !== b.votos) {
+        const lider = a.votos > b.votos ? a : b;
+        const atras = lider === a ? b : a;
+        const precisa = 50 + ((lider.votos - atras.votos) / proj.restantes) * 50;
+        const nomeAtras = nomes[atras === a ? 0 : 1];
+        itens.push('<div class="proj-item"><h4>O que seria preciso para virar</h4><p class="proj-valor">' + (precisa > 100 ? "mais de 100%" : pct(precisa, 1)) + "</p><p>" +
+          (precisa > 100
+            ? "Pelas estimativas deste painel, não sobram votos suficientes para " + esc(nomeAtras) + " virar o jogo."
+            : esc(nomeAtras) + " precisaria dessa fatia dos votos que ainda não foram contados. Até agora, tem " + pct(atras.pct, 1) + " dos votos válidos.") + "</p></div>");
+      }
+    }
+    alvo.innerHTML = '<div class="proj-grade">' + itens.join("") + "</div>";
   }
 
   function renderEvolucao() {
     const alvo = $("evolucao");
-    const par = finalistas();
-    const pontos = lerEvolucao().sort((x, y) => x.pst - y.pst);
-    $("evo-nota").textContent = pontos.length ? pontos.length + " leitura(s) do TSE guardadas neste navegador" : "";
-    if (pontos.length < 2 || par.length < 2) {
-      alvo.innerHTML = '<p class="mudo">O gráfico mostra o percentual de cada finalista conforme as seções são apuradas (Brasil). Ele começa a partir da 2ª atualização do TSE vista por este navegador; deixe a página aberta.</p>';
+    const par = Dados.finalistas();
+    const pontosEv = Dados.evolucao().sort(function (x, y) { return x.pst - y.pst; });
+    $("evo-nota").textContent = pontosEv.length ? pontosEv.length + (pontosEv.length === 1 ? " leitura" : " leituras") + " neste navegador" : "";
+    if (pontosEv.length < 2 || par.length < 2) {
+      alvo.innerHTML = '<div class="vazio-msg"><b>O gráfico se forma durante a apuração</b><span>Ele mostra como o percentual de cada candidato muda conforme as urnas chegam. Deixe esta página aberta e ele vai se desenhando a cada atualização do TSE.</span></div>';
       return;
     }
-    const cores = coresPara(par.map((c) => c.numero));
-    const ys = [].concat.apply([], pontos.map((p) => par.map((f) => p.v[f.numero]).filter((v) => v != null)));
+    const numeros = par.map(function (c) { return c.numero; });
+    const P = papeis(numeros);
+    const ys = [].concat.apply([], pontosEv.map(function (p) { return numeros.map(function (n) { return p.v[n]; }).filter(function (v) { return v != null; }); }));
     const yMin = Math.floor(Math.min.apply(null, ys.concat([50])) - 1);
     const yMax = Math.ceil(Math.max.apply(null, ys.concat([50])) + 1);
     const passo = yMax - yMin > 20 ? 5 : yMax - yMin > 8 ? 2 : 1;
     const ticks = [];
     for (let t = Math.ceil(yMin / passo) * passo; t <= yMax; t += passo) ticks.push(t);
     const porPst = {};
-    for (const p of pontos) porPst[p.pst] = p;
+    pontosEv.forEach(function (p) { porPst[p.pst] = p; });
+    const nomes = apelidos(par[0].nome, par[1].nome);
     Graficos.linhas(alvo, {
-      titulo: "Evolução do percentual de votos válidos de cada finalista conforme as seções são apuradas",
-      series: par.map((f) => ({
-        nome: nomeCurto(f.nome),
-        rotuloFinal: nomeCurto(f.nome) + " " + fmtN(pontos[pontos.length - 1].v[f.numero], 1) + "%",
-        cor: cores[f.numero],
-        pontos: pontos.map((p) => ({ x: p.pst, y: p.v[f.numero] })),
-      })),
-      x: { min: 0, max: 100, ticks: [0, 25, 50, 75, 100], fmt: (v) => fmtN(v, 0) + "%" },
-      y: { min: yMin, max: yMax, ticks: ticks, fmt: (v, longo) => (longo ? pctTxt(v) : fmtN(v, 0) + "%") },
+      titulo: "Evolução do percentual de votos válidos de cada finalista conforme as urnas são apuradas",
+      series: par.map(function (f, i) {
+        return {
+          nome: nomes[i],
+          rotuloFinal: nomes[i] + " " + fmtN(pontosEv[pontosEv.length - 1].v[f.numero], 1) + "%",
+          cor: fundo(P[f.numero]),
+          pontos: pontosEv.map(function (p) { return { x: p.pst, y: p.v[f.numero] }; }),
+        };
+      }),
+      x: { min: 0, max: 100, ticks: [0, 25, 50, 75, 100], rotulo: "Urnas apuradas", fmt: function (v) { return fmtN(v, 0) + "%"; } },
+      y: { min: yMin, max: yMax, ticks: ticks, fmt: function (v, longo) { return longo ? pct(v, 2) : fmtN(v, 0) + "%"; } },
       referencia: { y: 50, rotulo: "50%" },
-      margemDireita: 130,
-      dica: (x) => fmtN(x, 2) + "% das seções · " + porPst[x].hg,
+      margemDireita: 128,
+      altura: 250,
+      dica: function (x) { return fmtN(x, 1) + "% das urnas · " + porPst[x].hg.slice(0, 5); },
     });
   }
 
-  // ---- Histórico -------------------------------------------------------------------------
+  // ---- Histórico ------------------------------------------------------------------------------------------------------------------------------------------
   function serieHistorica() {
-    const anos = HISTORICO.anos.map((ano) => ({ ano: ano, t1: HISTORICO.comoResultado(ano, 1), t2: HISTORICO.comoResultado(ano, 2), parcial2: false }));
-    const br1 = resultado("federal1", "br");
+    const anos = HISTORICO.anos.map(function (ano) {
+      return { ano: ano, t1: HISTORICO.comoResultado(ano, 1), t2: HISTORICO.comoResultado(ano, 2), parcial: false };
+    });
+    const br1 = Dados.resultado("federal1", "br");
     const br2 = estado.dados.federal2.br;
-    anos.push({ ano: 2026, t1: br1, t2: br2 && br2.pctSecoes > 0 ? br2 : null, parcial2: br2 ? !br2.finalizada : false });
+    anos.push({
+      ano: 2026,
+      t1: br1 && !br1.reserva ? br1 : null,
+      t2: br2 && br2.pctSecoes > 0 ? br2 : null,
+      parcial: !!(br2 && br2.pctSecoes > 0 && !br2.finalizada),
+    });
     return anos;
   }
 
   function renderHistorico() {
     const serie = serieHistorica();
-    // 2º turno: barra 100% por ano, PT sempre à esquerda quando disputou.
-    const linhas = serie.filter((s) => s.t2).map((s) => {
-      const cands = s.t2.candidatos.slice(0, 2);
-      cands.sort((x, y) => (x.numero === "13" ? -1 : y.numero === "13" ? 1 : y.votos - x.votos));
-      const cores = coresPara(cands.map((c) => c.numero));
+
+    // 2º turno de cada eleição: o adversário do PT (azul) à esquerda, o PT (vermelho) à direita.
+    const margens = [];
+    const partidosAdversario = {};
+    const linhas = serie.filter(function (s) { return s.t2; }).map(function (s) {
+      const dois = s.t2.candidatos.slice(0, 2);
+      const papel = papeis(dois.map(function (c) { return c.numero; }));
+      dois.sort(function (x, y) { return (papel[x.numero] === "azul" ? 0 : 1) - (papel[y.numero] === "azul" ? 0 : 1); });
+      const dif = Math.abs(dois[0].pct - dois[1].pct);
+      margens.push({ ano: s.ano, margem: dif, parcial: s.parcial });
+      const adversario = dois.find(function (c) { return papel[c.numero] !== "vermelho"; }) || dois[0];
+      (partidosAdversario[adversario.partido] = partidosAdversario[adversario.partido] || []).push(s.ano);
       return {
-        rotulo: "<b>" + s.ano + "</b>" + (s.parcial2 ? "<small>parcial · " + pctTxt(s.t2.pctSecoes, 0) + "</small>" : ""),
-        dica: s.ano + " · 2º turno" + (s.parcial2 ? " (parcial)" : ""),
-        partes: cands.map((c) => ({
-          nome: titulo(c.nome) + " (" + c.partido + ")",
-          valor: c.pct,
-          cor: cores[c.numero],
-          texto: nomeCurto(c.nome) + " " + fmtN(c.pct, 1) + "%",
-          textoLongo: pctTxt(c.pct) + " · " + inteiro(c.votos) + " votos",
-        })),
+        rotulo: "<b>" + s.ano + "</b>" + (s.parcial ? "parcial · " + pct(s.t2.pctSecoes, 0) + " das urnas" : ""),
+        fim: "<b>" + fmtN(dif, 1) + " pts</b>de diferença",
+        dica: s.ano + " · 2º turno" + (s.parcial ? " (parcial)" : ""),
+        partes: dois.map(function (c) {
+          return {
+            nome: nomeExibicao(c.nome) + " (" + c.partido + ")", valor: c.pct, cor: fundo(papel[c.numero]), sobre: sobre(papel[c.numero]),
+            texto: fmtN(c.pct, 1) + "%", textoLongo: pct(c.pct, 2) + " · " + inteiro(c.votos) + " votos", nomeNoSegmento: nomeCurto(c.nome),
+          };
+        }),
       };
     });
     Graficos.barras100($("hist-segundo"), linhas, { meio: true });
+    const adversarios = Object.keys(partidosAdversario).map(function (p) {
+      const anos = partidosAdversario[p];
+      return p + " em " + (anos.length > 1 ? anos.slice(0, -1).join(", ") + " e " + anos[anos.length - 1] : anos[0]);
+    }).join("; ");
+    $("hist-legenda-cores").innerHTML = '<li><i class="amostra" style="background:var(--vermelho)"></i>Candidato do PT</li>' +
+      '<li><i class="amostra" style="background:var(--azul)"></i>Adversário do PT (' + esc(adversarios) + ")</li>";
+    const leitura1 = Texto.fraseMargemHistorica(margens);
+    $("hist-leitura-1").hidden = !leitura1;
+    $("hist-leitura-1").textContent = leitura1;
 
-    const xs = serie.map((s) => s.ano);
-    const eixoX = { min: 2010, max: 2026, ticks: xs, fmt: (v) => String(v) };
-    function serieDe(campo, turno, nome, cor) {
+    // Participação ao longo do tempo
+    const abst = ui.histIndicador === "abstencao";
+    $("hist-sub").textContent = abst
+      ? "Percentual de eleitores que não foram votar em cada eleição."
+      : "Votos em branco somados aos nulos, em percentual de quem compareceu.";
+    document.querySelectorAll("[data-hist]").forEach(function (b) { b.setAttribute("aria-pressed", String(b.dataset.hist === ui.histIndicador)); });
+    const valorDe = function (r) {
+      if (!r) return null;
+      if (abst) return r.pctAbstencao;
+      return r.pctBrancos != null && r.pctNulos != null ? r.pctBrancos + r.pctNulos : null;
+    };
+    const mk = function (turno, nome, cor) {
       return {
-        nome: nome,
-        cor: cor,
-        pontos: serie.map((s) => {
+        nome: nome, cor: cor, rotuloFinal: nome,
+        pontos: serie.map(function (s) {
           const r = turno === 1 ? s.t1 : s.t2;
-          return { x: s.ano, y: r && r[campo] != null ? r[campo] : null, oco: turno === 2 && s.parcial2 && s.ano === 2026 };
+          return { x: s.ano, y: valorDe(r), oco: turno === 2 && s.parcial };
         }),
       };
-    }
-    function faixaY(series, passo) {
-      const vs = [].concat.apply([], series.map((s) => s.pontos.map((p) => p.y).filter((v) => v != null)));
-      const min = Math.max(0, Math.floor((Math.min.apply(null, vs) - 1) / passo) * passo);
-      const max = Math.ceil((Math.max.apply(null, vs) + 1) / passo) * passo;
-      const ticks = [];
-      for (let t = min; t <= max + 1e-9; t += passo) ticks.push(t);
-      return { min: min, max: max, ticks: ticks, fmt: (v, longo) => (longo ? pctTxt(v) : fmtN(v, 0) + "%") };
-    }
-    const abst = [serieDe("pctAbstencao", 1, "1º turno", "var(--aqua)"), serieDe("pctAbstencao", 2, "2º turno", "var(--violeta)")];
-    Graficos.linhas($("hist-abstencao"), { titulo: "Abstenção por eleição", series: abst, x: eixoX, y: faixaY(abst, 2), altura: 220, margemDireita: 70 });
-    const inval = serie.map((s) => {
-      const soma = (r) => (r && r.pctBrancos != null && r.pctNulos != null ? r.pctBrancos + r.pctNulos : null);
-      return { ano: s.ano, t1: soma(s.t1), t2: soma(s.t2) };
+    };
+    const series = [mk(1, "1º turno", "var(--turno-1)"), mk(2, "2º turno", "var(--turno-2)")];
+    const todos = [].concat.apply([], series.map(function (s) { return s.pontos.map(function (p) { return p.y; }).filter(function (v) { return v != null; }); }));
+    const yMin = Math.max(0, Math.floor((Math.min.apply(null, todos) - 1) / 2) * 2);
+    const yMax = Math.ceil((Math.max.apply(null, todos) + 1) / 2) * 2;
+    const ticks = [];
+    for (let t = yMin; t <= yMax; t += 2) ticks.push(t);
+    Graficos.linhas($("hist-linhas"), {
+      titulo: abst ? "Abstenção em cada eleição presidencial desde 2010" : "Brancos e nulos em cada eleição presidencial desde 2010",
+      series: series,
+      x: { min: 2010, max: 2026, ticks: serie.map(function (s) { return s.ano; }), rotulo: "Ano", fmt: function (v) { return String(v); } },
+      y: { min: yMin, max: yMax, ticks: ticks, fmt: function (v, longo) { return longo ? pct(v, 2) : fmtN(v, 0) + "%"; } },
+      altura: 260,
+      margemDireita: 84,
+      dica: function (x) { return String(x); },
     });
-    const invSeries = [1, 2].map((t) => ({
-      nome: t + "º turno",
-      cor: t === 1 ? "var(--aqua)" : "var(--violeta)",
-      pontos: inval.map((s) => ({ x: s.ano, y: t === 1 ? s.t1 : s.t2, oco: t === 2 && s.ano === 2026 && serie[serie.length - 1].parcial2 })),
-    }));
-    Graficos.linhas($("hist-invalidos"), { titulo: "Brancos e nulos por eleição", series: invSeries, x: eixoX, y: faixaY(invSeries, 2), altura: 220, margemDireita: 70 });
-    $("hist-legenda").innerHTML = '<span class="item"><span class="amostra" style="background:var(--aqua)"></span>1º turno</span><span class="item"><span class="amostra" style="background:var(--violeta)"></span>2º turno</span><span class="item mudo">ponto vazado = 2026 ainda em apuração</span>';
+    $("hist-legenda").innerHTML = '<li><i class="amostra" style="background:var(--turno-1)"></i>1º turno</li><li><i class="amostra" style="background:var(--turno-2)"></i>2º turno</li>' +
+      (serie[serie.length - 1].parcial ? '<li class="mudo">ponto vazado = 2026 em apuração</li>' : "");
+    const leitura2 = Texto.fraseSerie(abst ? "A abstenção" : "Os brancos e nulos", 2, series[1].pontos.map(function (p) { return { ano: p.x, v: p.y, parcial: p.oco }; }));
+    $("hist-leitura-2").hidden = !leitura2;
+    $("hist-leitura-2").textContent = leitura2;
 
     // Tabela completa
-    const linhasTab = [];
-    for (const s of serie) {
-      for (const t of [1, 2]) {
+    const corpoTab = [];
+    serie.forEach(function (s) {
+      [1, 2].forEach(function (t) {
         const r = t === 1 ? s.t1 : s.t2;
-        if (!r) continue;
+        if (!r) return;
         const [p1, p2] = r.candidatos;
-        const margemVotos = p1 && p2 ? p1.votos - p2.votos : null;
-        const parcial = t === 2 && s.parcial2;
-        linhasTab.push("<tr><td>" + s.ano + "</td><td>" + t + "º" + (parcial ? " (parcial)" : "") + "</td><td>" + (p1 ? esc(titulo(p1.nome)) + " (" + esc(p1.partido) + ")" : "—") + "</td><td>" + (p1 ? pctTxt(p1.pct) : "—") +
-          "</td><td>" + (p2 ? esc(titulo(p2.nome)) + " (" + esc(p2.partido) + ")" : "—") + "</td><td>" + (p2 ? pctTxt(p2.pct) : "—") + "</td><td>" + inteiro(margemVotos) +
-          "</td><td>" + milhoes(r.eleitorado) + "</td><td>" + pctTxt(r.pctComparecimento) + "</td><td>" + pctTxt(r.pctAbstencao) + "</td><td>" + pctTxt(r.pctBrancos) + "</td><td>" + pctTxt(r.pctNulos) + "</td></tr>");
-      }
-    }
-    $("hist-tabela").innerHTML = "<table><thead><tr><th>Ano</th><th>Turno</th><th>1º colocado</th><th>%</th><th>2º colocado</th><th>%</th><th>Diferença (votos)</th><th>Eleitorado</th><th>Comparec.</th><th>Abstenção</th><th>Brancos</th><th>Nulos</th></tr></thead><tbody>" +
-      linhasTab.join("") + "</tbody></table>";
+        const parcial = t === 2 && s.parcial;
+        corpoTab.push("<tr><td>" + s.ano + "</td><td>" + t + "º" + (parcial ? " (parcial)" : "") + "</td><td>" + (p1 ? esc(nomeExibicao(p1.nome)) + " (" + esc(p1.partido) + ")" : "—") + "</td><td>" + (p1 ? pct(p1.pct, 2) : "—") +
+          "</td><td>" + (p2 ? esc(nomeExibicao(p2.nome)) + " (" + esc(p2.partido) + ")" : "—") + "</td><td>" + (p2 ? pct(p2.pct, 2) : "—") +
+          "</td><td>" + (r.eleitorado ? milhoes(r.eleitorado) : "—") + "</td><td>" + pct(r.pctComparecimento, 1) + "</td><td>" + pct(r.pctAbstencao, 1) + "</td><td>" + pct(r.pctBrancos, 1) + "</td><td>" + pct(r.pctNulos, 1) + "</td></tr>");
+      });
+    });
+    $("hist-tabela").innerHTML = '<table class="tabela"><thead><tr><th scope="col">Ano</th><th scope="col">Turno</th><th scope="col">1º colocado</th><th scope="col">%</th><th scope="col">2º colocado</th><th scope="col">%</th><th scope="col">Eleitorado</th><th scope="col">Comparec.</th><th scope="col">Abstenção</th><th scope="col">Brancos</th><th scope="col">Nulos</th></tr></thead><tbody>' + corpoTab.join("") + "</tbody></table>";
   }
 
-  // ---- Governadores ------------------------------------------------------------------------
+  // ---- Governadores -----------------------------------------------------------------------------------------------------------------------------------------------------
   function renderGovernadores() {
-    const alvo = $("governadores");
-    const ufs = TSE.UFS.filter((uf) => estado.dados.estadual2[uf]).sort((x, y) => TSE.NOMES[x].localeCompare(TSE.NOMES[y], "pt-BR"));
+    const alvo = $("governadores-corpo");
+    const ufs = TSE.UFS.filter(function (uf) { return estado.dados.estadual2[uf]; }).sort(function (x, y) { return TSE.NOMES[x].localeCompare(TSE.NOMES[y], "pt-BR"); });
     if (!ufs.length) {
-      alvo.innerHTML = '<p class="mudo">' + (estado.governadoresPresentes ? "Nenhum arquivo de 2º turno para governador encontrado (eleição " + esc(estado.eleicoes.estadual2.codigo) + ")." : "Procurando os estados com 2º turno para governador…") + "</p>";
-      $("gov-nota").textContent = "";
+      alvo.innerHTML = '<div class="vazio-msg"><b>' + (estado.governadoresPresentes ? "Nenhum estado com 2º turno para governador" : "Procurando os estados com 2º turno…") + "</b>" +
+        (estado.governadoresPresentes ? "<span>Se algum estado tiver disputa, ela aparece aqui automaticamente.</span>" : "") + "</div>";
       return;
     }
-    $("gov-nota").textContent = ufs.length + " estado(s) com 2º turno";
-    alvo.innerHTML = ufs.map((uf) => {
+    $("gov-desc").textContent = ufs.length === 1 ? "Um estado tem 2º turno para governador." : ufs.length + " estados têm 2º turno para governador.";
+    alvo.innerHTML = '<div class="gov-grade">' + ufs.map(function (uf) {
       const r = estado.dados.estadual2[uf];
       const cands = r.candidatos.slice(0, 2);
-      const cores = coresPara(cands.map((c) => c.numero).sort());
       const comecou = r.pctSecoes > 0;
-      const linhas = cands.map((c) =>
-        '<div class="gov-cand"><span><span class="chave" style="background:' + cores[c.numero] + '"></span><b>' + esc(nomeCurto(c.nome)) + "</b> " + esc(c.partido) + (c.eleito ? ' <span class="selo selo-eleito">Eleito</span>' : "") +
-        "</span><span class=\"num\"><b>" + (comecou ? pctTxt(c.pct) : "—") + '</b></span><div class="trilho"><div style="width:' + (comecou ? c.pct : 0) + "%;background:" + cores[c.numero] + '"></div></div></div>').join("");
-      return '<div class="gov"><div class="gov-topo"><b>' + esc(TSE.NOMES[uf]) + '</b><span class="mudo pequeno">' + pctTxt(r.pctSecoes, 1) + " apurado</span></div>" + linhas + "</div>";
+      const lider = comecou && cands.length === 2 && cands[0].votos !== cands[1].votos ? cands[0] : null;
+      const itens = cands.map(function (c) {
+        return '<div class="gov-cand' + (lider === c ? " lidera" : "") + '"><div class="gov-cand-linha"><span><b style="font-weight:650">' + esc(nomeCurto(c.nome)) + "</b> <small>" + esc(c.partido) + "</small>" +
+          (c.eleito ? '<span class="selo-eleito">Eleito</span>' : "") + "</span><b>" + (comecou ? pct(c.pct, 1) : "—") + '</b></div><div class="trilho" aria-hidden="true"><i style="width:' + (comecou ? c.pct : 0) + '%"></i></div></div>';
+      }).join("");
+      return '<article class="gov"><div class="gov-topo"><b>' + esc(TSE.NOMES[uf]) + "</b><small>" + (comecou ? pct(r.pctSecoes, 0) + " apurado" : "aguardando") + "</small></div>" + itens + "</article>";
+    }).join("") + "</div>";
+  }
+
+  // ---- Perguntas frequentes ------------------------------------------------------------------------------------------------------------------------------------------------
+  function renderFaq() {
+    $("faq").innerHTML = Texto.PERGUNTAS.map(function (q) {
+      return "<details><summary>" + esc(q.p) + '</summary><div class="resposta">' + q.r.map(function (t) { return "<p>" + esc(t) + "</p>"; }).join("") + "</div></details>";
     }).join("");
   }
 
-  // ---- Controles -------------------------------------------------------------------------------
-  function montarControles() {
-    const sel = $("recorte");
-    const ufs = TSE.UFS.slice().sort((x, y) => TSE.NOMES[x].localeCompare(TSE.NOMES[y], "pt-BR"));
-    sel.innerHTML = ['<option value="br">Brasil</option>']
-      .concat(ufs.map((uf) => '<option value="' + uf + '">' + TSE.NOMES[uf] + " (" + uf.toUpperCase() + ")</option>"))
-      .concat(['<option value="zz">Exterior</option>']).join("");
-    sel.value = estado.recorte;
-    sel.addEventListener("change", () => mudarRecorte(sel.value));
-
-    document.querySelectorAll("[data-turno]").forEach((b) => b.addEventListener("click", () => {
-      estado.turno = Number(b.dataset.turno);
-      atualizarUrl();
-      renderizar();
-    }));
-    $("modo-mapa").addEventListener("change", (ev) => {
-      estado.modoMapa = ev.target.value;
-      renderMapa();
-    });
-    $("atualizar").addEventListener("click", () => atualizarAoVivo());
-    $("tema").addEventListener("click", alternarTema);
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && estado.proximaLeitura && Date.now() >= estado.proximaLeitura) atualizarAoVivo();
-    });
-    let espera = null;
-    window.addEventListener("resize", () => {
-      clearTimeout(espera);
-      espera = setTimeout(renderGraficos, 150);
-    });
-    setInterval(atualizarRelogio, 1000);
-  }
-
-  function mudarRecorte(uf) {
-    estado.recorte = uf;
-    $("recorte").value = uf;
-    atualizarUrl();
-    renderizar();
-    if (window.scrollY > 300) $("placar").scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
+  // ---- Controles ------------------------------------------------------------------------------------------------------------------------------------------------------------------
   function atualizarUrl() {
     const p = new URLSearchParams(location.search);
-    if (estado.recorte === "br") p.delete("uf");
-    else p.set("uf", estado.recorte);
-    if (estado.turno === 1) p.set("turno", "1");
+    if (ui.uf === "br") p.delete("uf");
+    else p.set("uf", ui.uf);
+    if (ui.turno === 1) p.set("turno", "1");
     else p.delete("turno");
     const q = p.toString();
-    history.replaceState(null, "", location.pathname + (q ? "?" + q : ""));
+    history.replaceState(null, "", location.pathname + (q ? "?" + q : "") + location.hash);
   }
 
   function alternarTema() {
     const raiz = document.documentElement;
     const atual = raiz.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     raiz.dataset.theme = atual === "dark" ? "light" : "dark";
-    try {
-      localStorage.setItem("painel:tema", raiz.dataset.theme);
-    } catch (e) {
-      /* preferência só nesta visita */
-    }
+    gravarPreferencia("painel:tema", raiz.dataset.theme);
   }
 
-  function aplicarTemaSalvo() {
-    try {
-      const t = localStorage.getItem("painel:tema");
-      if (t === "dark" || t === "light") document.documentElement.dataset.theme = t;
-    } catch (e) {
-      /* tema do sistema */
-    }
+  function montarControles() {
+    // Seletor de estado do painel
+    const ufsOrdenadas = TSE.UFS.slice().sort(function (x, y) { return TSE.NOMES[x].localeCompare(TSE.NOMES[y], "pt-BR"); });
+    $("uf-select").innerHTML = ['<option value="br">Brasil (todos os estados)</option>']
+      .concat(ufsOrdenadas.map(function (uf) { return '<option value="' + uf + '">' + esc(TSE.NOMES[uf]) + " (" + uf.toUpperCase() + ")</option>"; }))
+      .concat(['<option value="zz">Exterior</option>']).join("");
+    $("uf-select").value = ui.uf;
+    $("uf-select").addEventListener("change", function (ev) { escolherUf(ev.target.value, false); });
+
+    $("modo-mapa").addEventListener("change", function (ev) {
+      ui.modoMapa = ev.target.value;
+      renderMapa();
+    });
+    document.querySelectorAll("[data-visao]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        ui.visaoMapa = b.dataset.visao;
+        gravarPreferencia("painel:visao-mapa", ui.visaoMapa);
+        renderMapa();
+      });
+    });
+    document.querySelectorAll("[data-hist]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        ui.histIndicador = b.dataset.hist;
+        renderHistorico();
+      });
+    });
+
+    // Atalho "Ver meu estado" no resumo
+    $("hero").addEventListener("change", function (ev) {
+      const sel = ev.target.closest("[data-uf-rapido]");
+      if (!sel || !sel.value) return;
+      const uf = sel.value;
+      sel.value = "";
+      escolherUf(uf, true);
+      $("estados").scrollIntoView({ behavior: reduzMovimento ? "auto" : "smooth", block: "start" });
+    });
+
+    // Resumo: troca de turno e "tentar de novo" (o conteúdo é redesenhado, então delegamos).
+    $("hero").addEventListener("click", function (ev) {
+      const t = ev.target.closest("[data-turno]");
+      if (t) {
+        ui.turno = Number(t.dataset.turno);
+        atualizarUrl();
+        renderHero();
+        renderKpis();
+        const novo = $("hero").querySelector('[data-turno="' + ui.turno + '"]');
+        if (novo) novo.focus();
+        return;
+      }
+      if (ev.target.closest("[data-acao='atualizar']")) Dados.atualizar();
+    });
+
+    // Tabela: ordenar e abrir estado
+    const tabela = $("tabela-ufs");
+    tabela.addEventListener("click", function (ev) {
+      const coluna = ev.target.closest("button[data-col]");
+      if (coluna) {
+        const id = coluna.dataset.col;
+        ui.ordem = { coluna: id, desc: ui.ordem.coluna === id ? !ui.ordem.desc : id !== "nome" };
+        renderTabela();
+        const foco = tabela.querySelector('button[data-col="' + id + '"]');
+        if (foco) foco.focus();
+        return;
+      }
+      const linha = ev.target.closest("tr[data-uf]");
+      if (linha) escolherUf(linha.dataset.uf, true);
+    });
+    tabela.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      const linha = ev.target.closest("tr[data-uf]");
+      if (linha && ev.target === linha) {
+        ev.preventDefault();
+        escolherUf(linha.dataset.uf, true);
+      }
+    });
+    $("filtro-uf").addEventListener("input", function (ev) {
+      ui.filtro = ev.target.value;
+      renderTabela();
+    });
+
+    $("atualizar").addEventListener("click", function () { Dados.atualizar(); });
+    $("tema").addEventListener("click", alternarTema);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && estado.proximaLeitura && Date.now() >= estado.proximaLeitura) Dados.atualizar();
+    });
+
+    // Foto que não carrega vira a inicial do nome (o evento "error" não sobe na árvore: captura).
+    document.addEventListener("error", function (ev) {
+      const img = ev.target;
+      if (img && img.tagName === "IMG" && img.classList.contains("foto") && img.dataset.vazio) img.outerHTML = img.dataset.vazio;
+    }, true);
+
+    let espera = null;
+    let larguraAnterior = window.innerWidth;
+    window.addEventListener("resize", function () {
+      clearTimeout(espera);
+      espera = setTimeout(function () {
+        if (window.innerWidth === larguraAnterior) return; // barra do navegador no celular: só a altura muda
+        larguraAnterior = window.innerWidth;
+        renderMapa();
+        renderComparar();
+        renderEvolucao();
+        renderHistorico();
+      }, 160);
+    });
+    setInterval(atualizarRelogio, 1000);
   }
 
-  // ---- Desenho ------------------------------------------------------------------------------------
-  function renderGraficos() {
-    renderComparacao();
-    renderEvolucao();
-    renderHistorico();
+  // ---- Desenho geral ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  /** Resumo dos dados carregados: muda quando chega algo novo do TSE. */
+  function versaoDados() {
+    let v = "";
+    ["federal1", "federal2", "anterior1", "anterior2", "estadual2"].forEach(function (chave) {
+      const d = estado.dados[chave];
+      for (const uf in d) v += uf + (d[uf].hg || "") + (d[uf].pctSecoes || 0) + ";";
+    });
+    return v + "|" + estado.falhas + estado.falhaTotal + estado.usandoCache + Dados.situacao() + (estado.governadoresPresentes ? "g" : "");
   }
+  let versaoDesenhada = null;
 
   function renderizar() {
-    document.querySelectorAll("[data-turno]").forEach((b) => b.setAttribute("aria-selected", String(Number(b.dataset.turno) === estado.turno)));
-    definirStatus();
+    // Situação e aviso são baratos e mudam a cada consulta; o resto só se os dados mudaram,
+    // para não tirar o foco de quem navega pelo teclado nem fechar balões a cada minuto.
+    renderStatus();
     renderAviso();
-    const partes = [renderPlacar, renderKpis, renderProjecao, renderMapa, renderTabelaUfs, renderRegioes, renderGraficos, renderGovernadores];
+    const versao = versaoDados();
+    if (versao === versaoDesenhada) return;
+    versaoDesenhada = versao;
+    const partes = [renderHero, renderKpis, renderMapa, renderPainelUf, renderTabela, renderComparar, renderProjecao, renderEvolucao, renderHistorico, renderGovernadores];
     for (const parte of partes) {
       try {
         parte();
@@ -1128,30 +1191,26 @@
         console.error("Falha ao desenhar", parte.name, e);
       }
     }
+    UI.verificarAjuda();
+    if (ui.irParaUf && estado.dados.federal2.br) {
+      ui.irParaUf = false;
+      setTimeout(function () { $("estados").scrollIntoView({ behavior: "auto", block: "start" }); }, 50);
+    }
   }
 
-  async function iniciar() {
-    aplicarTemaSalvo();
+  function iniciar() {
+    const anuncio = document.createElement("div");
+    anuncio.id = "anuncio";
+    anuncio.className = "so-leitor";
+    anuncio.setAttribute("role", "status");
+    anuncio.setAttribute("aria-live", "polite");
+    document.body.appendChild(anuncio);
+
+    UI.iniciarAjuda();
+    UI.espiarSecoes($("menu"));
     montarControles();
-    // Última leitura do 2º turno, para a tela não abrir vazia.
-    const cache2 = lerCache("federal2");
-    if (cache2 && cache2.dados) {
-      estado.dados.federal2 = cache2.dados;
-      estado.usandoCache = true;
-    }
-    for (const chave of ["federal1", "anterior1", "anterior2"]) {
-      const c = lerCache(chave);
-      if (c && c.dados) estado.dados[chave] = c.dados;
-    }
-    renderizar();
-    await descobrirCodigos();
-    await Promise.all([
-      carregarFinal("federal1").catch(() => null),
-      carregarFinal("anterior2").catch(() => null),
-      carregarFinal("anterior1").catch(() => null),
-      atualizarAoVivo(),
-    ]);
-    renderizar();
+    renderFaq();
+    Dados.iniciar(renderizar);
   }
 
   iniciar();

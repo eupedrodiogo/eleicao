@@ -1,11 +1,11 @@
-# Publica o painel no GitHub Pages copiando os arquivos do site para a
-# branch gh-pages a cada push na branch principal do painel.
+# Publica o painel no GitHub Pages: roda os testes e, se passarem, copia os
+# arquivos do site para a branch gh-pages a cada alteração do painel.
 name: Publicar no GitHub Pages
 
 on:
   push:
     branches: [claude/zen-gauss-x082qz]
-    paths: ["index.html", "css/**", "js/**", ".github/workflows/pages.yml"]
+    paths: ["index.html", "css/**", "js/**", "assets/**", "tests/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -20,10 +20,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Testes
+        run: npm test
       - name: Montar o site
         run: |
           mkdir -p _site
-          cp -r index.html css js _site/
+          cp -r index.html css js assets _site/
           touch _site/.nojekyll
       - name: Enviar para gh-pages
         run: |
