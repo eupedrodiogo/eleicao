@@ -581,7 +581,7 @@ select, .busca input {
 .barra-rotulo b { display: block; color: var(--ink); font-size: var(--t-md); font-weight: 700; }
 .barra-fim { font-size: var(--t-xs); color: var(--ink-3); text-align: right; font-variant-numeric: tabular-nums; min-width: 64px; line-height: 1.25; }
 .barra-fim b { display: block; color: var(--ink); font-size: var(--t-sm); }
-.barra-trilho { position: relative; display: flex; gap: 2px; height: 32px; min-width: 0; }
+.barra-trilho { position: relative; display: flex; gap: 2px; height: 32px; min-width: 0; border-radius: 8px; background: var(--surface-2); }
 .barra-seg {
   height: 100%; min-width: 2px; background: var(--c); color: var(--on, #fff); font-size: var(--t-xs); font-weight: 700;
   display: flex; align-items: center; padding: 0 8px; overflow: hidden; white-space: nowrap; font-variant-numeric: tabular-nums;
@@ -737,7 +737,7 @@ select, .busca input {
   .kpis { gap: 10px; }
   .kpi { padding: 14px; }
   .insights { grid-template-columns: 1fr; }
-  .barra-linha { grid-template-columns: 78px minmax(0, 1fr); }
+  .barra-linha { grid-template-columns: 94px minmax(0, 1fr); }
   .barra-fim { grid-column: 2; text-align: left; display: flex; gap: 8px; align-items: baseline; }
   .barra-fim b { display: inline; }
   .barra-trilho { height: 30px; }

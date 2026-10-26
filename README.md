@@ -35,7 +35,7 @@ Parâmetros de URL: `?uf=sp` abre no estado, `?turno=1` abre no 1º turno.
 | --- | --- |
 | **Resumo** | Manchete escrita automaticamente a partir dos dados ("Flávio lidera a apuração…", "Disputa apertada…", "… é eleito"), os dois candidatos com foto, percentual e votos, barra com a marca de 50%, quanto da apuração já foi feito e um aviso de que o resultado ainda pode mudar. Troca para o 1º turno com um clique e tem o atalho **Ver meu estado**. |
 | **Indicadores** | Eleitorado, comparecimento, abstenção e brancos+nulos, cada um com a variação contra o 1º turno e contra 2022 e um "?" que explica o termo. |
-| **Por estado** | Mapa real do Brasil colorido por 6 visões (quem lidera, quem ficou na frente no 1º turno, quem ganhou terreno desde o 1º turno e desde 2022, abstenção, urnas apuradas), versão em quadrados para tocar com facilidade, painel com os números do estado escolhido e tabela ordenável com busca. |
+| **Por estado** | Mapa real do Brasil colorido por 6 visões (quem lidera, quem ficou na frente no 1º turno, quem ganhou terreno desde o 1º turno e desde 2022, abstenção, urnas apuradas), versão em quadrados para tocar com facilidade, painel com os números do estado escolhido, soma por região do país e tabela ordenável com busca. |
 | **1º × 2º turno** | Como os votos se dividiram nos dois turnos e em 2022, quem ganhou terreno (comparando só os votos dos dois finalistas, que é a conta justa) e o destino dos votos dos candidatos eliminados. |
 | **O que falta** | Quanto falta contar, estimativa do resultado final, o que seria preciso para virar o jogo e a evolução do placar durante a noite. |
 | **Histórico** | 2º turno de 2010 a 2026, abstenção e brancos+nulos ao longo do tempo, com uma frase de leitura de cada gráfico. |

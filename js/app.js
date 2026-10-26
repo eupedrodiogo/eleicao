@@ -628,6 +628,39 @@
     if (rolar) garantirVisivel($("painel-uf"));
   }
 
+  // ---- Por região --------------------------------------------------------------------------------------------
+  function renderRegioes() {
+    const alvo = $("regioes");
+    const par = Dados.finalistas();
+    if (par.length < 2) {
+      alvo.innerHTML = '<div class="esq" style="height:180px"></div>';
+      return;
+    }
+    const P = papeis(par.map(function (c) { return c.numero; }));
+    const linhas = TSE.REGIOES.map(function (reg) {
+      const soma = TSE.somar(reg.ufs.map(function (uf) { return estado.dados.federal2[uf]; }));
+      if (!soma || !(soma.pctSecoes > 0)) {
+        return { rotulo: "<b>" + esc(reg.nome) + "</b>aguardando apuração", partes: [], aria: reg.nome + ": aguardando apuração" };
+      }
+      const partes = par.map(function (f) {
+        const c = achar(soma, f.numero);
+        if (!c) return null;
+        return {
+          nome: nomeExibicao(f.nome), valor: c.pct, cor: fundo(P[f.numero]), sobre: sobre(P[f.numero]), texto: fmtN(c.pct, 1) + "%",
+          textoLongo: pct(c.pct, 2) + " · " + inteiro(c.votos) + " votos", nomeNoSegmento: nomeCurto(f.nome),
+        };
+      }).filter(Boolean);
+      const dif = partes.length === 2 ? Math.abs(partes[0].valor - partes[1].valor) : null;
+      return {
+        rotulo: "<b>" + esc(reg.nome) + "</b>" + pct(soma.pctSecoes, 0) + " das urnas",
+        fim: dif == null ? "" : "<b>" + fmtN(dif, 1) + " pts</b>de diferença",
+        dica: reg.nome + " · 2º turno",
+        partes: partes,
+      };
+    });
+    Graficos.barras100(alvo, linhas, { meio: true });
+  }
+
   // ---- Tabela de estados -------------------------------------------------------------------------------------------
   const semAcento = (t) => String(t).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 
@@ -1155,6 +1188,7 @@
         if (window.innerWidth === larguraAnterior) return; // barra do navegador no celular: só a altura muda
         larguraAnterior = window.innerWidth;
         renderMapa();
+        renderRegioes();
         renderComparar();
         renderEvolucao();
         renderHistorico();
@@ -1183,7 +1217,7 @@
     const versao = versaoDados();
     if (versao === versaoDesenhada) return;
     versaoDesenhada = versao;
-    const partes = [renderHero, renderKpis, renderMapa, renderPainelUf, renderTabela, renderComparar, renderProjecao, renderEvolucao, renderHistorico, renderGovernadores];
+    const partes = [renderHero, renderKpis, renderMapa, renderPainelUf, renderRegioes, renderTabela, renderComparar, renderProjecao, renderEvolucao, renderHistorico, renderGovernadores];
     for (const parte of partes) {
       try {
         parte();
